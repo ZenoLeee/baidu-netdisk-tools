@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>百度网盘授权</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #1a2a6c, #b21f1f, #fdbb2d);
+            color: #333;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 500px;
+            width: 100%;
+        }
+
+        .card {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            padding: 30px;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 10px;
+            color: #1a2a6c;
+        }
+
+        .subtitle {
+            font-size: 1rem;
+            margin-bottom: 30px;
+            color: #666;
+        }
+
+        .auth-btn {
+            background: #1a2a6c;
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 1.1rem;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin: 0 auto 20px;
+        }
+
+        .auth-btn:hover {
+            background: #0d1a4d;
+        }
+
+        .code-display {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            word-break: break-all;
+            font-family: monospace;
+            font-size: 0.9rem;
+            display: none;
+        }
+
+        .instructions {
+            background: #e8f5e9;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        .instructions h3 {
+            color: #2e7d32;
+            margin-bottom: 10px;
+        }
+
+        .instructions ol {
+            padding-left: 20px;
+        }
+
+        .instructions li {
+            margin-bottom: 8px;
+        }
+
+        .status {
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            font-weight: bold;
+            display: none;
+        }
+
+        .status-success {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .status-error {
+            background: #ffebee;
+            color: #c62828;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>百度网盘授权</h1>
+            <p class="subtitle">点击下方按钮进行授权，获取授权码后使用Python代码进行后续操作</p>
+
+            <button id="auth-btn" class="auth-btn">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm3.5 7.5a.5.5 0 0 1 0 1H5.707l2.147 2.146a.5.5 0 0 1-.708.708l-3-3a.5.5 0 0 1 0-.708l3-3a.5.5 0 1 1 .708.708L5.707 7.5H11.5z"/>
+                </svg>
+                授权百度账号
+            </button>
+
+            <div id="code-display" class="code-display"></div>
+
+            <div id="status" class="status"></div>
+
+            <div class="instructions">
+                <h3>使用说明</h3>
+                <ol>
+                    <li>点击上方"授权百度账号"按钮</li>
+                    <li>在百度授权页面登录并授权</li>
+                    <li>授权完成后，页面将显示授权码</li>
+                    <li>复制授权码，在Python代码中使用</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const authBtn = document.getElementById('auth-btn');
+            const codeDisplay = document.getElementById('code-display');
+            const statusDiv = document.getElementById('status');
+
+            // 检查URL参数中是否有授权码
+            function checkUrlParams() {
+                const urlParams = new URLSearchParams(window.location.search);
+                const code = urlParams.get('code');
+
+                if (code) {
+                    // 显示授权码
+                    codeDisplay.textContent = code;
+                    codeDisplay.style.display = 'block';
+
+                    // 显示成功状态
+                    statusDiv.textContent = '授权成功！请复制下面的授权码，在Python代码中使用。';
+                    statusDiv.className = 'status status-success';
+                    statusDiv.style.display = 'block';
+
+                    // 更新按钮文本
+                    authBtn.innerHTML = `
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                            <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
+                        </svg>
+                        重新授权
+                    `;
+                } else if (urlParams.get('error')) {
+                    // 显示错误状态
+                    statusDiv.textContent = '授权失败，请重试。';
+                    statusDiv.className = 'status status-error';
+                    statusDiv.style.display = 'block';
+                }
+            }
+
+            // 授权按钮点击事件
+            authBtn.addEventListener('click', function() {
+                // 应用配置信息
+                const clientId = 'mu79W8Z84iu8eV6cUvru2ckcGtsz5bxL';
+                const redirectUri = 'http://8.138.162.11:8939/';
+
+                // 构建授权URL
+                const scope = 'basic,netdisk';
+                const authUrl = `https://openapi.baidu.com/oauth/2.0/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&display=popup`;
+
+                // 跳转到授权页面
+                window.location.href = authUrl;
+            });
+
+            // 初始检查URL参数
+            checkUrlParams();
+        });
+    </script>
+</body>
+</html>
