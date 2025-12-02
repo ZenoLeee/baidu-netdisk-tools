@@ -283,6 +283,174 @@ class BaiduPanAPI:
         except Exception as e:
             logger.error(f'保存重复文件报告失败: {e}')
 
+    def delete_duplicate_files(self, duplicates, keep_strategy='first'):
+        """
+        删除重复文件
+
+        Args:
+            duplicates: 重复文件字典，由find_duplicate_files方法返回
+            keep_strategy: 保留策略，可选值：
+                          'first' - 保留第一个文件（按路径排序）
+                          'last' - 保留最后一个文件（按路径排序）
+                          'shortest_path' - 保留路径最短的文件
+                          'longest_path' - 保留路径最长的文件
+        """
+        if not duplicates:
+            logger.info('没有重复文件需要删除')
+            return
+
+        total_to_delete = 0
+        deleted_count = 0
+        failed_count = 0
+        saved_space = 0
+        delete_paths = []
+
+        for md5, duplicate_info in duplicates.items():
+            files = duplicate_info['files']
+            file_size = duplicate_info['size']
+
+            if len(files) <= 1:
+                continue
+
+            # 根据策略选择保留哪个文件
+            if keep_strategy == 'last':
+                files.sort(key=lambda x: x['path'])
+                keep_file = files[-1]
+                delete_files = files[:-1]
+            elif keep_strategy == 'shortest_path':
+                files.sort(key=lambda x: len(x['path']))
+                keep_file = files[0]
+                delete_files = files[1:]
+            elif keep_strategy == 'longest_path':
+                files.sort(key=lambda x: len(x['path']), reverse=True)
+                keep_file = files[0]
+                delete_files = files[1:]
+            else:  # 'first' 默认策略
+                files.sort(key=lambda x: x['path'])
+                keep_file = files[0]
+                delete_files = files[1:]
+
+            total_to_delete += len(delete_files)
+            saved_space += file_size * len(delete_files)
+
+            # 收集要删除的文件路径
+            for file_to_delete in delete_files:
+                file_path = file_to_delete['path']
+                delete_paths.append(file_path)
+
+        if delete_paths:
+            # 批量删除所有重复文件
+            logger.info(f"准备删除 {len(delete_paths)} 个重复文件...")
+            if self.delete_files_batch(delete_paths):
+                deleted_count = len(delete_paths)
+                logger.info(f"成功删除 {deleted_count} 个重复文件")
+            else:
+                failed_count = len(delete_paths)
+                logger.error(f"删除失败: {len(delete_paths)} 个文件")
+
+        logger.info(f"删除操作完成:")
+        logger.info(f"  计划删除: {total_to_delete} 个文件")
+        logger.info(f"  成功删除: {deleted_count} 个文件")
+        logger.info(f"  删除失败: {failed_count} 个文件")
+        logger.info(f"  节省空间: {self._format_size(saved_space)}")
+
+    def delete_file(self, file_path):
+        """
+        删除单个文件
+
+        Args:
+            file_path: 文件路径
+
+        Returns:
+            bool: 删除是否成功
+        """
+        return self.delete_files_batch([file_path])
+
+    def delete_files_batch(self, file_paths):
+        """
+        批量删除文件
+
+        Args:
+            file_paths: 文件路径列表
+
+        Returns:
+            bool: 删除是否成功
+        """
+        if not file_paths:
+            logger.warning('没有要删除的文件')
+            return False
+
+        url = f'{self.HOST}/rest/2.0/xpan/file'
+        params = {
+            'method': 'filemanager',
+            'opera': 'delete',
+            'access_token': self.access_token
+        }
+
+        # 根据API文档，删除操作时filelist是路径数组
+        data = {
+            'async': 2,  # 异步删除
+            'filelist': json.dumps(file_paths)  # 直接传入路径数组
+        }
+
+        try:
+            response = requests.post(url, params=params, data=data, timeout=30).json()
+
+            if response.get('errno') == 0:
+                logger.info(f"批量删除请求已提交: {len(file_paths)} 个文件")
+                logger.info(f"任务ID: {response.get('taskid', '无')}")
+                return True
+            else:
+                logger.error(f"批量删除失败: {response.get('errmsg', '未知错误')}")
+                return False
+        except Exception as e:
+            logger.error(f"批量删除请求失败: {e}")
+            return False
+
+    def get_duplicate_file_paths(self, duplicates, keep_strategy='first'):
+        """
+        获取需要删除的重复文件的路径列表
+
+        Args:
+            duplicates: 重复文件字典
+            keep_strategy: 保留策略
+
+        Returns:
+            list: 需要删除的文件路径列表
+        """
+        delete_paths = []
+
+        for md5, duplicate_info in duplicates.items():
+            files = duplicate_info['files']
+
+            if len(files) <= 1:
+                continue
+
+            # 根据策略选择保留哪个文件
+            if keep_strategy == 'last':
+                files.sort(key=lambda x: x['path'])
+                keep_file = files[-1]
+                delete_files = files[:-1]
+            elif keep_strategy == 'shortest_path':
+                files.sort(key=lambda x: len(x['path']))
+                keep_file = files[0]
+                delete_files = files[1:]
+            elif keep_strategy == 'longest_path':
+                files.sort(key=lambda x: len(x['path']), reverse=True)
+                keep_file = files[0]
+                delete_files = files[1:]
+            else:  # 'first' 默认策略
+                files.sort(key=lambda x: x['path'])
+                keep_file = files[0]
+                delete_files = files[1:]
+
+            for file_to_delete in delete_files:
+                file_path = file_to_delete['path']
+                if file_path:
+                    delete_paths.append(file_path)
+
+        return delete_paths
+
     def _format_size(self, size_bytes):
         """格式化文件大小"""
         if size_bytes == 0:
@@ -325,6 +493,63 @@ def main():
     # 查找重复文件
     duplicates = api.find_duplicate_files(files)
     api.save_duplicates_report(duplicates, folder_path)
+
+    if not duplicates:
+        return
+
+    # 询问是否删除重复文件
+    print("\n" + "=" * 50)
+    print("重复文件检测完成！")
+    print("=" * 50)
+
+    delete_choice = input("\n是否要删除重复文件？(y/n, 默认n): ").strip().lower()
+
+    if delete_choice == 'y':
+        print("\n请选择保留策略:")
+        print("1. first - 保留第一个文件（按路径排序）")
+        print("2. last - 保留最后一个文件（按路径排序）")
+        print("3. shortest_path - 保留路径最短的文件")
+        print("4. longest_path - 保留路径最长的文件")
+
+        strategy_choice = input("请选择策略 (1/2/3/4, 默认1): ").strip()
+
+        if strategy_choice == '2':
+            keep_strategy = 'last'
+        elif strategy_choice == '3':
+            keep_strategy = 'shortest_path'
+        elif strategy_choice == '4':
+            keep_strategy = 'longest_path'
+        else:
+            keep_strategy = 'first'
+
+        print(f"\n将使用 '{keep_strategy}' 策略删除重复文件")
+
+        # 预览将要删除的文件
+        delete_paths = api.get_duplicate_file_paths(duplicates, keep_strategy)
+        print(f"将要删除 {len(delete_paths)} 个重复文件")
+
+        # 显示部分将要删除的文件
+        if len(delete_paths) > 0:
+            print("\n将要删除的部分文件:")
+            for i, path in enumerate(delete_paths[:10]):
+                print(f"  {i + 1}. {path}")
+            if len(delete_paths) > 10:
+                print(f"  ... 还有 {len(delete_paths) - 10} 个文件")
+
+        confirm = input("\n确定要删除吗？此操作不可恢复！(输入'y'确认删除): ").strip()
+
+        if confirm.lower() == 'y':
+            logger.info("开始删除重复文件...")
+
+            # 一次性删除所有重复文件（API支持批量删除）
+            if api.delete_files_batch(delete_paths):
+                logger.info(f"删除请求已提交！共删除 {len(delete_paths)} 个重复文件")
+            else:
+                logger.error("删除操作失败")
+        else:
+            logger.info("取消删除操作")
+    else:
+        logger.info("未执行删除操作")
 
 
 if __name__ == '__main__':
