@@ -79,7 +79,7 @@ class BaiduPanAPI:
 
     def get_access_token(self, code):
         """使用授权码获取访问令牌"""
-        url = f'{self.HOST}/oauth/2.0/token'
+        url = f'https://openapi.baidu.com/oauth/2.0/token'
         params = {
             'grant_type': 'authorization_code',
             'code': code,
@@ -205,7 +205,8 @@ class BaiduPanAPI:
                             'name': item.get('server_filename', ''),
                             'size': item.get('size', 0),
                             'path': item.get('path', ''),
-                            'md5': item.get('md5', '')
+                            'md5': item.get('md5', ''),
+                            'server_mtime': item.get('server_mtime', 0)  # 添加修改时间用于排序
                         }
                         all_files.append(file_info)
                         processed_count += 1
@@ -283,77 +284,6 @@ class BaiduPanAPI:
         except Exception as e:
             logger.error(f'保存重复文件报告失败: {e}')
 
-    def delete_duplicate_files(self, duplicates, keep_strategy='first'):
-        """
-        删除重复文件
-
-        Args:
-            duplicates: 重复文件字典，由find_duplicate_files方法返回
-            keep_strategy: 保留策略，可选值：
-                          'first' - 保留第一个文件（按路径排序）
-                          'last' - 保留最后一个文件（按路径排序）
-                          'shortest_path' - 保留路径最短的文件
-                          'longest_path' - 保留路径最长的文件
-        """
-        if not duplicates:
-            logger.info('没有重复文件需要删除')
-            return
-
-        total_to_delete = 0
-        deleted_count = 0
-        failed_count = 0
-        saved_space = 0
-        delete_paths = []
-
-        for md5, duplicate_info in duplicates.items():
-            files = duplicate_info['files']
-            file_size = duplicate_info['size']
-
-            if len(files) <= 1:
-                continue
-
-            # 根据策略选择保留哪个文件
-            if keep_strategy == 'last':
-                files.sort(key=lambda x: x['path'])
-                keep_file = files[-1]
-                delete_files = files[:-1]
-            elif keep_strategy == 'shortest_path':
-                files.sort(key=lambda x: len(x['path']))
-                keep_file = files[0]
-                delete_files = files[1:]
-            elif keep_strategy == 'longest_path':
-                files.sort(key=lambda x: len(x['path']), reverse=True)
-                keep_file = files[0]
-                delete_files = files[1:]
-            else:  # 'first' 默认策略
-                files.sort(key=lambda x: x['path'])
-                keep_file = files[0]
-                delete_files = files[1:]
-
-            total_to_delete += len(delete_files)
-            saved_space += file_size * len(delete_files)
-
-            # 收集要删除的文件路径
-            for file_to_delete in delete_files:
-                file_path = file_to_delete['path']
-                delete_paths.append(file_path)
-
-        if delete_paths:
-            # 批量删除所有重复文件
-            logger.info(f"准备删除 {len(delete_paths)} 个重复文件...")
-            if self.delete_files_batch(delete_paths):
-                deleted_count = len(delete_paths)
-                logger.info(f"成功删除 {deleted_count} 个重复文件")
-            else:
-                failed_count = len(delete_paths)
-                logger.error(f"删除失败: {len(delete_paths)} 个文件")
-
-        logger.info(f"删除操作完成:")
-        logger.info(f"  计划删除: {total_to_delete} 个文件")
-        logger.info(f"  成功删除: {deleted_count} 个文件")
-        logger.info(f"  删除失败: {failed_count} 个文件")
-        logger.info(f"  节省空间: {self._format_size(saved_space)}")
-
     def delete_file(self, file_path):
         """
         删除单个文件
@@ -369,10 +299,8 @@ class BaiduPanAPI:
     def delete_files_batch(self, file_paths):
         """
         批量删除文件
-
         Args:
             file_paths: 文件路径列表
-
         Returns:
             bool: 删除是否成功
         """
@@ -387,7 +315,6 @@ class BaiduPanAPI:
             'access_token': self.access_token
         }
 
-        # 根据API文档，删除操作时filelist是路径数组
         data = {
             'async': 2,  # 异步删除
             'filelist': json.dumps(file_paths)  # 直接传入路径数组
@@ -407,13 +334,13 @@ class BaiduPanAPI:
             logger.error(f"批量删除请求失败: {e}")
             return False
 
-    def get_duplicate_file_paths(self, duplicates, keep_strategy='first'):
+    def get_duplicate_file_paths(self, duplicates, keep_strategy='latest'):
         """
         获取需要删除的重复文件的路径列表
 
         Args:
             duplicates: 重复文件字典
-            keep_strategy: 保留策略
+            keep_strategy: 保留策略，'latest'保留最新，'earliest'保留最早
 
         Returns:
             list: 需要删除的文件路径列表
@@ -426,23 +353,15 @@ class BaiduPanAPI:
             if len(files) <= 1:
                 continue
 
-            # 根据策略选择保留哪个文件
-            if keep_strategy == 'last':
-                files.sort(key=lambda x: x['path'])
-                keep_file = files[-1]
-                delete_files = files[:-1]
-            elif keep_strategy == 'shortest_path':
-                files.sort(key=lambda x: len(x['path']))
-                keep_file = files[0]
-                delete_files = files[1:]
-            elif keep_strategy == 'longest_path':
-                files.sort(key=lambda x: len(x['path']), reverse=True)
-                keep_file = files[0]
-                delete_files = files[1:]
-            else:  # 'first' 默认策略
-                files.sort(key=lambda x: x['path'])
-                keep_file = files[0]
-                delete_files = files[1:]
+            # 根据修改时间排序
+            if keep_strategy == 'earliest':
+                # 保留最早的文件（修改时间最小）
+                files.sort(key=lambda x: x.get('server_mtime', 0))
+                delete_files = files[1:]  # 删除除了最早的其他文件
+            else:  # 'latest' 默认策略
+                # 保留最新的文件（修改时间最大）
+                files.sort(key=lambda x: x.get('server_mtime', 0), reverse=True)
+                delete_files = files[1:]  # 删除除了最新的其他文件
 
             for file_to_delete in delete_files:
                 file_path = file_to_delete['path']
@@ -475,7 +394,7 @@ def main():
         return
 
     # 获取要扫描的文件夹
-    folder_path = '/荔枝/北京话事人'
+    folder_path = '/'
 
     # 获取最大深度
     depth_input = input("请输入最大递归深度 (默认无限制，直接回车): ").strip()
@@ -506,23 +425,17 @@ def main():
 
     if delete_choice == 'y':
         print("\n请选择保留策略:")
-        print("1. first - 保留第一个文件（按路径排序）")
-        print("2. last - 保留最后一个文件（按路径排序）")
-        print("3. shortest_path - 保留路径最短的文件")
-        print("4. longest_path - 保留路径最长的文件")
+        print("1. 保留最新文件 (按修改时间)")
+        print("2. 保留最早文件 (按修改时间)")
 
-        strategy_choice = input("请选择策略 (1/2/3/4, 默认1): ").strip()
+        strategy_choice = input("请选择策略 (1/2, 默认1): ").strip()
 
         if strategy_choice == '2':
-            keep_strategy = 'last'
-        elif strategy_choice == '3':
-            keep_strategy = 'shortest_path'
-        elif strategy_choice == '4':
-            keep_strategy = 'longest_path'
+            keep_strategy = 'earliest'
         else:
-            keep_strategy = 'first'
+            keep_strategy = 'latest'
 
-        print(f"\n将使用 '{keep_strategy}' 策略删除重复文件")
+        print(f"\n将保留{('最新' if keep_strategy == 'latest' else '最早')}的文件，删除其他重复文件")
 
         # 预览将要删除的文件
         delete_paths = api.get_duplicate_file_paths(duplicates, keep_strategy)
