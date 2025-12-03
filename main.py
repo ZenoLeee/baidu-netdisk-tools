@@ -38,6 +38,8 @@ def main():
         if window.auth_manager.is_authenticated():
             # 已登录，直接显示主页面
             window.show()
+            # 加载缓存并显示文件
+            QTimer.singleShot(1000, window.check_cache_and_load)
         else:
             # 未登录，显示窗口并自动弹出登录对话框
             window.show()
