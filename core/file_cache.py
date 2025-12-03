@@ -1,12 +1,9 @@
-import json
 import time
-import hashlib
 import sqlite3
 import threading
-import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from utils.logger import get_logger
 from core.models import FileInfo
@@ -448,7 +445,7 @@ class FileCache:
         LEFT JOIN files f ON a.account_id = f.account_id
         GROUP BY a.account_id, a.account_name, a.last_login, a.created_at
         ORDER BY a.last_login DESC
-        ''')
+                       ''')
 
         accounts = []
         for row in cursor.fetchall():
