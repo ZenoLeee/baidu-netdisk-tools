@@ -25,11 +25,20 @@ class MainWindow:
         # 配置网格权重，实现响应式布局
         self.configure_grid()
 
-        # 创建控件
-        self.button = tk.Button(self.root, text="点击获取授权码",
-                           bg="#1E90FF", font=("微软雅黑", 13), relief="raised", borderwidth=3, width=15,
-                           activebackground="#BEBEBE", activeforeground="white", command=self.open_html_file)
-        self.button.place(relx=0.5, rely=0.2, anchor="center")
+        # # 创建控件
+
+        label = tk.Label(self.root, text="欢迎使用百度网盘工具箱！",
+                         font=("微软雅黑", 15, "bold"))
+        # 放置标签控件
+        label.pack(pady=10)
+        label = tk.Label(self.root, text="高效管理您的网盘文件",
+                         font=("微软雅黑", 10))
+        # 放置标签控件
+        label.pack()
+        # self.button = tk.Button(self.root, text="点击获取授权码",
+        #                    bg="#1E90FF", font=("微软雅黑", 13), relief="raised", borderwidth=3, width=15,
+        #                    activebackground="#BEBEBE", activeforeground="white", command=self.open_html_file)
+        # self.button.place(relx=0.5, rely=0.2, anchor="center")
 
 
 
