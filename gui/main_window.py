@@ -1,12 +1,12 @@
 """
-主窗口
+主窗口 - 修复多个问题
 """
 
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QStatusBar, QMessageBox, QProgressBar, QFrame,
-                             QAction, QStackedWidget, QProgressDialog)
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer
-from PyQt5.QtGui import QFont, QIcon, QColor
+                             QAction, QStackedWidget, QProgressDialog, QToolButton)
+from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer, QDateTime
+from PyQt5.QtGui import QFont, QIcon
 
 from gui.styles import AppStyles
 from gui.login_dialog import LoginDialog
@@ -66,6 +66,14 @@ class MainWindow(QMainWindow):
         # 扫描相关
         self.scan_worker = None
         self.current_scan_result = None
+        self.results_window = None  # 保存结果窗口引用
+
+        # 刷新相关
+        self.last_refresh_time = None
+        self.refresh_cooldown = 10  # 10秒冷却时间
+        self.refresh_timer = QTimer()
+        self.refresh_timer.timeout.connect(self.update_refresh_button)
+        self.refresh_cooldown_seconds = 0
 
         # 设置UI
         self.setup_ui()
@@ -160,7 +168,7 @@ class MainWindow(QMainWindow):
         self.login_page = login_page
 
     def setup_main_page(self):
-        """设置主页面 - 简化版"""
+        """设置主页面 - 添加刷新按钮"""
         main_page = QWidget()
         main_layout = QVBoxLayout(main_page)
         main_layout.setContentsMargins(20, 20, 20, 20)
@@ -198,12 +206,22 @@ class MainWindow(QMainWindow):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
 
+        # 刷新按钮
+        self.refresh_btn = QPushButton('🔄 刷新')
+        self.refresh_btn.setObjectName('primary')
+        self.refresh_btn.setFixedSize(80, 30)
+        self.refresh_btn.clicked.connect(self.refresh_user_info)
+        self.refresh_btn.setToolTip('点击刷新用户信息和配额')
+        btn_layout.addWidget(self.refresh_btn)
+
+        # 切换账号按钮
         switch_account_btn = QPushButton('切换账号')
         switch_account_btn.setObjectName('primary')
         switch_account_btn.setFixedSize(100, 30)
         switch_account_btn.clicked.connect(self.switch_account)
         btn_layout.addWidget(switch_account_btn)
 
+        # 退出登录按钮
         logout_button = QPushButton('退出登录')
         logout_button.setObjectName('danger')
         logout_button.setFixedSize(100, 30)
@@ -247,44 +265,6 @@ class MainWindow(QMainWindow):
 
         self.stacked_widget.addWidget(main_page)
         self.main_page = main_page
-
-    def create_function_card(self, title: str, description: str,  icon_name: str, callback, color: QColor) -> QFrame:
-        """创建功能卡片"""
-        card = QFrame()
-        card.setObjectName('card')
-        card.setFixedHeight(150)
-        card.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(20, 20, 20, 20)
-        card_layout.setSpacing(10)
-
-        # 图标
-        icon_label = QLabel('📁')  # 临时图标，实际可以用QIcon
-        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_font = QFont()
-        icon_font.setPointSize(32)
-        icon_label.setFont(icon_font)
-        icon_label.setStyleSheet(f'color: {color.name()};')
-        card_layout.addWidget(icon_label)
-
-        # 标题
-        title_label = QLabel(title)
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_label.setObjectName('title')
-        card_layout.addWidget(title_label)
-
-        # 描述
-        desc_label = QLabel(description)
-        desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        desc_label.setObjectName('subtitle')
-        desc_label.setWordWrap(True)
-        card_layout.addWidget(desc_label)
-
-        # 点击事件
-        card.mousePressEvent = lambda event: callback()
-
-        return card
 
     def setup_statusbar(self):
         """设置状态栏"""
@@ -364,7 +344,6 @@ class MainWindow(QMainWindow):
         """显示登录对话框"""
         dialog = LoginDialog(self.auth_manager, self)
         dialog.login_success.connect(self.on_login_success)
-        dialog.switch_account_requested.connect(self.on_switch_account)
         dialog.exec_()
 
     def on_login_success(self):
@@ -376,6 +355,43 @@ class MainWindow(QMainWindow):
         # 加载用户信息
         self.load_user_info()
         self.status_label.setText('登录成功')
+
+    def refresh_user_info(self):
+        """刷新用户信息"""
+        if not self.api_client or not self.auth_manager.is_authenticated():
+            return
+
+        # 检查冷却时间
+        if self.last_refresh_time:
+            elapsed = (QDateTime.currentDateTime().toMSecsSinceEpoch() -
+                      self.last_refresh_time.toMSecsSinceEpoch()) / 1000
+            if elapsed < self.refresh_cooldown:
+                remaining = self.refresh_cooldown - int(elapsed)
+                self.status_label.setText(f'请等待 {remaining} 秒后再刷新')
+                return
+
+        # 开始刷新
+        self.last_refresh_time = QDateTime.currentDateTime()
+        self.refresh_btn.setEnabled(False)
+        self.refresh_cooldown_seconds = self.refresh_cooldown
+        self.refresh_timer.start(1000)  # 每秒触发一次
+
+        self.status_label.setText('正在刷新...')
+
+        # 执行刷新
+        self.load_user_info()
+
+    def update_refresh_button(self):
+        """更新刷新按钮状态"""
+        self.refresh_cooldown_seconds -= 1
+
+        if self.refresh_cooldown_seconds <= 0:
+            self.refresh_btn.setText('🔄 刷新')
+            self.refresh_btn.setEnabled(True)
+            self.refresh_timer.stop()
+            self.status_label.setText('刷新可用')
+        else:
+            self.refresh_btn.setText(f'🔄 {self.refresh_cooldown_seconds}秒')
 
     def load_user_info(self):
         """加载用户信息"""
@@ -392,7 +408,7 @@ class MainWindow(QMainWindow):
             if current_account:
                 self.current_account_label.setText(f'当前账号: {current_account}')
 
-            # 尝试获取用户信息（需要网络请求）
+            # 尝试获取用户信息
             user_info = self.api_client.get_user_info()
             if user_info and user_info.get('errno') == 0:
                 baidu_name = user_info.get('baidu_name', '百度用户')
@@ -409,7 +425,7 @@ class MainWindow(QMainWindow):
 
                 used_gb = used / (1024 ** 3)
                 total_gb = total / (1024 ** 3)
-                free_gb = (total - used) / (1024 ** 3)
+                free_gb = free / (1024 ** 3)
 
                 self.user_quota_label.setText(
                     f'已用: {used_gb:.1f}GB / 总共: {total_gb:.1f}GB '
@@ -422,7 +438,7 @@ class MainWindow(QMainWindow):
             logger.error(f'加载用户信息失败: {e}')
             # 显示默认信息
             self.user_name_label.setText('百度用户')
-            self.user_quota_label.setText('登录成功')
+            self.user_quota_label.setText('刷新失败')
 
     def open_scan_dialog(self):
         """打开扫描对话框"""
@@ -496,28 +512,17 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, '扫描错误', f'扫描过程中发生错误：{error_msg}')
 
     def show_results_window(self, result: ScanResult):
-        """显示结果窗口 - 修复版"""
-        # 隐藏主窗口
-        self.hide()
-
-        # 创建结果窗口
+        """显示结果窗口 - 修复任务栏图标问题"""
+        # 创建结果窗口，传入父窗口参数确保关闭行为正确
         self.results_window = ResultsWindow(result, self)
         self.results_window.delete_requested.connect(self.delete_files)
-        self.results_window.setWindowModality(Qt.WindowModal)
-
-        # 连接结果窗口关闭信号，重新显示主窗口
+        # 连接窗口关闭信号
         self.results_window.window_closed.connect(self.on_results_window_closed)
-
-        # 显示结果窗口
+        # 显示窗口
         self.results_window.show()
 
-    def on_results_window_closed(self):
-        """结果窗口关闭时的处理"""
-        # 重新显示主窗口
-        self.show()
-        # 更新用户信息
-        self.load_user_info()
-        self.status_label.setText('结果窗口已关闭')
+        # 最小化主窗口，而不是隐藏（保持任务栏图标）
+        self.showMinimized()
 
     def auto_delete_duplicates(self, result: ScanResult):
         """自动删除重复文件"""
@@ -594,39 +599,47 @@ class MainWindow(QMainWindow):
         # 显示登录对话框
         QTimer.singleShot(100, self.show_login_dialog)
 
-    def on_switch_account(self, account_name: str):
-        """切换到其他账号"""
-        if self.auth_manager.switch_account(account_name):
-            self.switch_to_main_page()
-            # 重新初始化API客户端
-            self.api_client = BaiduPanAPI(self.auth_manager)
-            self.scanner = FileScanner(self.api_client)
-            # 延迟加载用户信息
-            QTimer.singleShot(100, self.load_user_info)
-            self.status_label.setText(f'已切换到账号: {account_name}')
-
     def switch_account(self):
         """切换到其他账号"""
         # 创建切换账号对话框
         dialog = AccountSwitchDialog(self.auth_manager, self)
         dialog.account_selected.connect(self.on_account_selected)
+        dialog.add_account_requested.connect(self.show_login_dialog)
         dialog.exec_()
 
     def on_account_selected(self, account_name: str):
         """账号被选中"""
-        if account_name:
-            # 切换到指定账号
-            success = self.auth_manager.switch_account(account_name)
-            if success:
-                # 重新初始化API客户端
-                self.api_client = BaiduPanAPI(self.auth_manager)
-                self.scanner = FileScanner(self.api_client)
-                # 重新加载用户信息
-                self.load_user_info()
-                self.status_label.setText(f'已切换到账号: {account_name}')
-                QMessageBox.information(self, '切换成功', f'已切换到账号: {account_name}')
-            else:
-                QMessageBox.warning(self, '切换失败', '切换账号失败，请重试')
+        if not account_name:
+            return
+
+        # 检查是否已经是当前账号
+        if account_name == self.auth_manager.current_account:
+            self.status_label.setText(f'当前已在使用账号: {account_name}')
+            return
+
+        # 切换到指定账号
+        success = self.auth_manager.switch_account(account_name)
+        if success:
+            # 重新初始化API客户端
+            self.api_client = BaiduPanAPI(self.auth_manager)
+            self.scanner = FileScanner(self.api_client)
+            # 重新加载用户信息
+            self.load_user_info()
+            self.status_label.setText(f'已切换到账号: {account_name}')
+            QMessageBox.information(self, '切换成功', f'已切换到账号: {account_name}')
+        else:
+            QMessageBox.warning(self, '切换失败', '切换账号失败，请重试')
+
+    def on_results_window_closed(self):
+        """结果窗口关闭时的处理"""
+        # 恢复主窗口
+        self.showNormal()
+        # 激活窗口
+        self.activateWindow()
+        # 更新状态
+        self.status_label.setText('已返回主窗口')
+        # 清除结果窗口引用
+        self.results_window = None
 
     def open_settings(self):
         """打开设置"""
@@ -661,5 +674,17 @@ class MainWindow(QMainWindow):
             self.scan_worker.stop()
             self.scan_worker.quit()
             self.scan_worker.wait()
+
+        # 停止刷新定时器
+        if self.refresh_timer.isActive():
+            self.refresh_timer.stop()
+
+        # 如果结果窗口存在且窗口对象仍然有效，关闭它
+        try:
+            if self.results_window and hasattr(self.results_window, 'isVisible'):
+                self.results_window.close()
+        except:
+            # 如果窗口已经被删除，忽略错误
+            pass
 
         event.accept()

@@ -1,5 +1,5 @@
 """
-扫描结果显示窗口 - 修复关闭问题版本
+扫描结果显示窗口 - 简化关闭逻辑
 """
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QTableWidget, QTableWidgetItem,
@@ -17,7 +17,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 class ResultsWindow(QWidget):
-    """结果窗口 - 修复关闭问题版本"""
+    """结果窗口 - 简化关闭逻辑"""
     delete_requested = pyqtSignal(list, str)  # 删除文件请求
     window_closed = pyqtSignal()  # 窗口关闭信号
 
@@ -27,7 +27,8 @@ class ResultsWindow(QWidget):
         self.selected_files = []
 
         # 设置为独立窗口
-        self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint)
+        self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
+        self.setAttribute(Qt.WA_DeleteOnClose)  # 关闭时自动删除
 
         self.setup_ui()
         self.display_results()
@@ -53,7 +54,7 @@ class ResultsWindow(QWidget):
         back_btn = QPushButton('返回主窗口')
         back_btn.setObjectName('primary')
         back_btn.setFixedSize(100, 30)
-        back_btn.clicked.connect(self.close_window)
+        back_btn.clicked.connect(self.close)  # 直接关闭窗口
         header_layout.addWidget(back_btn)
 
         header_layout.addStretch()
@@ -334,13 +335,9 @@ class ResultsWindow(QWidget):
                 status_item.setForeground(QColor('#c0392b'))
             self.files_table.setItem(i, 4, status_item)
 
-    def close_window(self):
-        """关闭窗口"""
-        self.window_closed.emit()
-        self.close()
-
     def closeEvent(self, event):
         """关闭事件"""
+        # 发送窗口关闭信号
         self.window_closed.emit()
         event.accept()
 
