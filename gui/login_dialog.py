@@ -42,7 +42,9 @@ class LoginDialog(QDialog):
         self.auth_manager = auth_manager
         self.worker = None
         self.setup_ui()
-        self.load_accounts()
+
+        # 登录对话框只用于新登录，不显示已保存账号
+        self.saved_accounts_group.setVisible(False)
 
     def setup_ui(self):
         """设置UI - 简洁实用版"""

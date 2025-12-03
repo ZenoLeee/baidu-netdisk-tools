@@ -9,12 +9,13 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 from gui.main_window import MainWindow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
 
 def main():
     """主函数"""
@@ -32,7 +33,15 @@ def main():
 
         # 创建主窗口
         window = MainWindow()
-        window.show()
+
+        # 检查是否需要直接显示登录对话框
+        if window.auth_manager.is_authenticated():
+            # 已登录，直接显示主页面
+            window.show()
+        else:
+            # 未登录，显示窗口并自动弹出登录对话框
+            window.show()
+            QTimer.singleShot(300, window.show_login_dialog)
 
         logger.info('应用程序启动成功')
 

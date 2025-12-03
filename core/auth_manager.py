@@ -41,7 +41,7 @@ class AuthManager:
 
     def get_access_token(self, code: str, account_name: str = '默认账号') -> Dict[str, Any]:
         """使用授权码获取访问令牌"""
-        url = f'{self.host}/oauth/2.0/token'
+        url = f'https://openapi.baidu.com/oauth/2.0/token'
         params = {
             'grant_type': 'authorization_code',
             'code': code,
@@ -127,7 +127,7 @@ class AuthManager:
             logger.error('没有可用的刷新令牌或当前账号')
             return False
 
-        url = f'{self.host}/oauth/2.0/token'
+        url = f'https://openapi.baidu.com/oauth/2.0/token'
         params = {
             'grant_type': 'refresh_token',
             'refresh_token': self.refresh_token,

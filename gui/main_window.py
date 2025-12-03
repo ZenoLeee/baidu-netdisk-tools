@@ -12,6 +12,7 @@ from gui.styles import AppStyles
 from gui.login_dialog import LoginDialog
 from gui.scan_dialog import ScanDialog
 from gui.results_window import ResultsWindow
+from gui.account_switch_dialog import AccountSwitchDialog
 from core.auth_manager import AuthManager
 from core.api_client import BaiduPanAPI
 from core.file_scanner import FileScanner
@@ -339,10 +340,18 @@ class MainWindow(QMainWindow):
         """检查认证状态"""
         if self.auth_manager.is_authenticated():
             self.switch_to_main_page()
-            # 延迟加载用户信息，确保API客户端已初始化
-            QTimer.singleShot(100, self.load_user_info)
+            # 确保API客户端已经初始化
+            if not self.api_client:
+                self.api_client = BaiduPanAPI(self.auth_manager)
+                self.scanner = FileScanner(self.api_client)
+            # 立即加载用户信息
+            self.load_user_info()
         else:
             self.stacked_widget.setCurrentWidget(self.login_page)
+            # 重置用户信息显示
+            self.user_name_label.setText('未登录')
+            self.user_quota_label.setText('')
+            self.current_account_label.setText('')
 
     def switch_to_main_page(self):
         """切换到主页面"""
@@ -361,42 +370,59 @@ class MainWindow(QMainWindow):
     def on_login_success(self):
         """登录成功"""
         self.switch_to_main_page()
-        # 延迟加载用户信息
-        QTimer.singleShot(100, self.load_user_info)
+        # 重新初始化API客户端
+        self.api_client = BaiduPanAPI(self.auth_manager)
+        self.scanner = FileScanner(self.api_client)
+        # 加载用户信息
+        self.load_user_info()
         self.status_label.setText('登录成功')
 
     def load_user_info(self):
         """加载用户信息"""
-        if not self.api_client:
+        if not self.api_client or not self.auth_manager.is_authenticated():
+            # 显示默认信息
+            self.user_name_label.setText('未登录')
+            self.user_quota_label.setText('请先登录')
+            self.current_account_label.setText('')
             return
 
         try:
             # 显示当前账号信息
-            if self.auth_manager.current_account:
-                self.current_account_label.setText(f'当前账号: {self.auth_manager.current_account}')
+            current_account = self.auth_manager.current_account
+            if current_account:
+                self.current_account_label.setText(f'当前账号: {current_account}')
 
-            # 获取用户信息
+            # 尝试获取用户信息（需要网络请求）
             user_info = self.api_client.get_user_info()
-            if user_info:
-                self.user_name_label.setText(user_info.get('baidu_name', '百度用户'))
+            if user_info and user_info.get('errno') == 0:
+                baidu_name = user_info.get('baidu_name', '百度用户')
+                self.user_name_label.setText(baidu_name)
+            else:
+                self.user_name_label.setText('百度用户')
 
             # 获取配额信息
             quota_info = self.api_client.get_quota()
-            if quota_info:
+            if quota_info and quota_info.get('errno') == 0:
                 used = quota_info.get('used', 0)
                 total = quota_info.get('total', 0)
                 free = quota_info.get('free', 0)
 
                 used_gb = used / (1024 ** 3)
                 total_gb = total / (1024 ** 3)
-                free_gb = free / (1024 ** 3)
+                free_gb = (total - used) / (1024 ** 3)
 
                 self.user_quota_label.setText(
                     f'已用: {used_gb:.1f}GB / 总共: {total_gb:.1f}GB '
                     f'(可用: {free_gb:.1f}GB)'
                 )
+            else:
+                self.user_quota_label.setText('获取配额信息失败')
+
         except Exception as e:
             logger.error(f'加载用户信息失败: {e}')
+            # 显示默认信息
+            self.user_name_label.setText('百度用户')
+            self.user_quota_label.setText('登录成功')
 
     def open_scan_dialog(self):
         """打开扫描对话框"""
@@ -470,10 +496,28 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, '扫描错误', f'扫描过程中发生错误：{error_msg}')
 
     def show_results_window(self, result: ScanResult):
-        """显示结果窗口"""
-        results_window = ResultsWindow(result, self)
-        results_window.delete_requested.connect(self.delete_files)
-        results_window.show()
+        """显示结果窗口 - 修复版"""
+        # 隐藏主窗口
+        self.hide()
+
+        # 创建结果窗口
+        self.results_window = ResultsWindow(result, self)
+        self.results_window.delete_requested.connect(self.delete_files)
+        self.results_window.setWindowModality(Qt.WindowModal)
+
+        # 连接结果窗口关闭信号，重新显示主窗口
+        self.results_window.window_closed.connect(self.on_results_window_closed)
+
+        # 显示结果窗口
+        self.results_window.show()
+
+    def on_results_window_closed(self):
+        """结果窗口关闭时的处理"""
+        # 重新显示主窗口
+        self.show()
+        # 更新用户信息
+        self.load_user_info()
+        self.status_label.setText('结果窗口已关闭')
 
     def auto_delete_duplicates(self, result: ScanResult):
         """自动删除重复文件"""
@@ -532,10 +576,23 @@ class MainWindow(QMainWindow):
             self.progress_bar.setVisible(False)
 
     def logout(self):
-        """退出登录（返回登录窗口选择账号）"""
-        # 不清除tokens，只是返回到登录窗口
+        """退出登录（返回登录窗口）"""
+        # 清空当前状态
+        self.auth_manager.logout()
+        self.api_client = None
+        self.scanner = None
+
+        # 切换到登录页面
         self.stacked_widget.setCurrentWidget(self.login_page)
-        self.status_label.setText('请选择或登录账号')
+
+        # 重置UI状态
+        self.user_name_label.setText('未登录')
+        self.user_quota_label.setText('')
+        self.current_account_label.setText('')
+        self.status_label.setText('已退出登录')
+
+        # 显示登录对话框
+        QTimer.singleShot(100, self.show_login_dialog)
 
     def on_switch_account(self, account_name: str):
         """切换到其他账号"""
@@ -550,8 +607,26 @@ class MainWindow(QMainWindow):
 
     def switch_account(self):
         """切换到其他账号"""
-        # 显示登录对话框进行账号切换
-        self.show_login_dialog()
+        # 创建切换账号对话框
+        dialog = AccountSwitchDialog(self.auth_manager, self)
+        dialog.account_selected.connect(self.on_account_selected)
+        dialog.exec_()
+
+    def on_account_selected(self, account_name: str):
+        """账号被选中"""
+        if account_name:
+            # 切换到指定账号
+            success = self.auth_manager.switch_account(account_name)
+            if success:
+                # 重新初始化API客户端
+                self.api_client = BaiduPanAPI(self.auth_manager)
+                self.scanner = FileScanner(self.api_client)
+                # 重新加载用户信息
+                self.load_user_info()
+                self.status_label.setText(f'已切换到账号: {account_name}')
+                QMessageBox.information(self, '切换成功', f'已切换到账号: {account_name}')
+            else:
+                QMessageBox.warning(self, '切换失败', '切换账号失败，请重试')
 
     def open_settings(self):
         """打开设置"""
