@@ -1,10 +1,10 @@
 """
-主窗口 - 修复多个问题
+主窗口 - 修复卡顿和窗口问题
 """
 
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QStatusBar, QMessageBox, QProgressBar, QFrame,
-                             QAction, QStackedWidget, QProgressDialog, QToolButton)
+                             QAction, QStackedWidget, QProgressDialog)
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer, QDateTime
 from PyQt5.QtGui import QFont, QIcon
 
@@ -21,6 +21,26 @@ from utils.logger import get_logger
 from utils.config_manager import ConfigManager
 
 logger = get_logger(__name__)
+
+
+class RefreshWorker(QThread):
+    """刷新工作线程"""
+    finished = pyqtSignal(dict, dict)  # user_info, quota_info
+    error = pyqtSignal(str)
+
+    def __init__(self, api_client):
+        super().__init__()
+        self.api_client = api_client
+
+    def run(self):
+        try:
+            # 获取用户信息
+            user_info = self.api_client.get_user_info()
+            # 获取配额信息
+            quota_info = self.api_client.get_quota()
+            self.finished.emit(user_info, quota_info)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class ScanWorker(QThread):
@@ -66,7 +86,7 @@ class MainWindow(QMainWindow):
         # 扫描相关
         self.scan_worker = None
         self.current_scan_result = None
-        self.results_window = None  # 保存结果窗口引用
+        self.progress_dialog = None  # 修复：初始化 progress_dialog
 
         # 刷新相关
         self.last_refresh_time = None
@@ -74,6 +94,7 @@ class MainWindow(QMainWindow):
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.update_refresh_button)
         self.refresh_cooldown_seconds = 0
+        self.refresh_worker = None
 
         # 设置UI
         self.setup_ui()
@@ -85,7 +106,7 @@ class MainWindow(QMainWindow):
     def setup_ui(self):
         """设置UI"""
         self.setWindowTitle('百度网盘工具箱')
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(900, 650)
 
         # 设置样式
         self.setStyleSheet(AppStyles.get_stylesheet())
@@ -99,13 +120,14 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 创建堆叠窗口
+        # 创建堆叠窗口 - 用于切换不同页面
         self.stacked_widget = QStackedWidget()
         main_layout.addWidget(self.stacked_widget)
 
         # 创建页面
         self.setup_login_page()
         self.setup_main_page()
+        self.setup_results_page()
 
         # 创建状态栏
         self.setup_statusbar()
@@ -238,7 +260,7 @@ class MainWindow(QMainWindow):
         functions_layout = QVBoxLayout(functions_frame)
 
         # 重复文件扫描按钮
-        scan_button = QPushButton('扫描重复文件')
+        scan_button = QPushButton('🔍 扫描重复文件')
         scan_button.setObjectName('primary')
         scan_button.setMinimumHeight(50)
         scan_button.setIcon(QIcon.fromTheme('search'))
@@ -249,12 +271,12 @@ class MainWindow(QMainWindow):
         # 其他功能按钮（预留）
         other_buttons_layout = QHBoxLayout()
 
-        classify_btn = QPushButton('文件分类')
+        classify_btn = QPushButton('📂 文件分类')
         classify_btn.setMinimumHeight(40)
         classify_btn.clicked.connect(lambda: self.show_message('功能开发中'))
         other_buttons_layout.addWidget(classify_btn)
 
-        batch_btn = QPushButton('批量操作')
+        batch_btn = QPushButton('⚙️ 批量操作')
         batch_btn.setMinimumHeight(40)
         batch_btn.clicked.connect(lambda: self.show_message('功能开发中'))
         other_buttons_layout.addWidget(batch_btn)
@@ -265,6 +287,20 @@ class MainWindow(QMainWindow):
 
         self.stacked_widget.addWidget(main_page)
         self.main_page = main_page
+
+    def setup_results_page(self):
+        """设置结果页面"""
+        self.results_page = QWidget()
+        results_layout = QVBoxLayout(self.results_page)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 创建一个框架作为结果窗口的容器
+        self.results_container = QFrame()
+        self.results_container.setObjectName('resultsContainer')
+        results_layout.addWidget(self.results_container)
+
+        self.stacked_widget.addWidget(self.results_page)
+        self.results_page_index = self.stacked_widget.indexOf(self.results_page)
 
     def setup_statusbar(self):
         """设置状态栏"""
@@ -357,7 +393,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText('登录成功')
 
     def refresh_user_info(self):
-        """刷新用户信息"""
+        """刷新用户信息 - 使用工作线程避免卡顿"""
         if not self.api_client or not self.auth_manager.is_authenticated():
             return
 
@@ -378,46 +414,23 @@ class MainWindow(QMainWindow):
 
         self.status_label.setText('正在刷新...')
 
-        # 执行刷新
-        self.load_user_info()
+        # 创建工作线程执行刷新
+        self.refresh_worker = RefreshWorker(self.api_client)
+        self.refresh_worker.finished.connect(self.on_refresh_finished)
+        self.refresh_worker.error.connect(self.on_refresh_error)
+        self.refresh_worker.start()
 
-    def update_refresh_button(self):
-        """更新刷新按钮状态"""
-        self.refresh_cooldown_seconds -= 1
-
-        if self.refresh_cooldown_seconds <= 0:
-            self.refresh_btn.setText('🔄 刷新')
-            self.refresh_btn.setEnabled(True)
-            self.refresh_timer.stop()
-            self.status_label.setText('刷新可用')
-        else:
-            self.refresh_btn.setText(f'🔄 {self.refresh_cooldown_seconds}秒')
-
-    def load_user_info(self):
-        """加载用户信息"""
-        if not self.api_client or not self.auth_manager.is_authenticated():
-            # 显示默认信息
-            self.user_name_label.setText('未登录')
-            self.user_quota_label.setText('请先登录')
-            self.current_account_label.setText('')
-            return
-
+    def on_refresh_finished(self, user_info, quota_info):
+        """刷新完成"""
         try:
-            # 显示当前账号信息
-            current_account = self.auth_manager.current_account
-            if current_account:
-                self.current_account_label.setText(f'当前账号: {current_account}')
-
-            # 尝试获取用户信息
-            user_info = self.api_client.get_user_info()
+            # 更新用户信息
             if user_info and user_info.get('errno') == 0:
                 baidu_name = user_info.get('baidu_name', '百度用户')
                 self.user_name_label.setText(baidu_name)
             else:
                 self.user_name_label.setText('百度用户')
 
-            # 获取配额信息
-            quota_info = self.api_client.get_quota()
+            # 更新配额信息
             if quota_info and quota_info.get('errno') == 0:
                 used = quota_info.get('used', 0)
                 total = quota_info.get('total', 0)
@@ -434,11 +447,75 @@ class MainWindow(QMainWindow):
             else:
                 self.user_quota_label.setText('获取配额信息失败')
 
+            self.status_label.setText('刷新完成')
+
+        except Exception as e:
+            logger.error(f'刷新完成后处理失败: {e}')
+            self.status_label.setText('刷新失败')
+
+    def on_refresh_error(self, error_msg):
+        """刷新错误"""
+        self.status_label.setText(f'刷新失败: {error_msg}')
+
+    def update_refresh_button(self):
+        """更新刷新按钮状态"""
+        self.refresh_cooldown_seconds -= 1
+
+        if self.refresh_cooldown_seconds <= 0:
+            self.refresh_btn.setText('🔄 刷新')
+            self.refresh_btn.setEnabled(True)
+            self.refresh_timer.stop()
+            self.status_label.setText('刷新可用')
+        else:
+            self.refresh_btn.setText(f'🔄 {self.refresh_cooldown_seconds}秒')
+
+    def load_user_info(self):
+        """加载用户信息 - 使用工作线程避免卡顿"""
+        if not self.api_client or not self.auth_manager.is_authenticated():
+            # 显示默认信息
+            self.user_name_label.setText('未登录')
+            self.user_quota_label.setText('请先登录')
+            self.current_account_label.setText('')
+            return
+
+        # 显示当前账号信息
+        current_account = self.auth_manager.current_account
+        if current_account:
+            self.current_account_label.setText(f'当前账号: {current_account}')
+            self.user_name_label.setText(current_account)
+
+        # 启动工作线程获取数据
+        self.refresh_worker = RefreshWorker(self.api_client)
+        self.refresh_worker.finished.connect(self.on_load_user_info_finished)
+        self.refresh_worker.error.connect(self.on_load_user_info_error)
+        self.refresh_worker.start()
+
+    def on_load_user_info_finished(self, user_info, quota_info):
+        """加载用户信息完成"""
+        try:
+            if user_info and user_info.get('errno') == 0:
+                baidu_name = user_info.get('baidu_name', '百度用户')
+                self.user_name_label.setText(baidu_name)
+
+            if quota_info and quota_info.get('errno') == 0:
+                used = quota_info.get('used', 0)
+                total = quota_info.get('total', 0)
+                free = quota_info.get('free', 0)
+
+                used_gb = used / (1024 ** 3)
+                total_gb = total / (1024 ** 3)
+                free_gb = free / (1024 ** 3)
+
+                self.user_quota_label.setText(
+                    f'已用: {used_gb:.1f}GB / 总共: {total_gb:.1f}GB '
+                    f'(可用: {free_gb:.1f}GB)'
+                )
         except Exception as e:
             logger.error(f'加载用户信息失败: {e}')
-            # 显示默认信息
-            self.user_name_label.setText('百度用户')
-            self.user_quota_label.setText('刷新失败')
+
+    def on_load_user_info_error(self, error_msg):
+        """加载用户信息错误"""
+        logger.error(f'加载用户信息失败: {error_msg}')
 
     def open_scan_dialog(self):
         """打开扫描对话框"""
@@ -452,6 +529,9 @@ class MainWindow(QMainWindow):
 
     def start_scan(self, path: str, settings: dict):
         """开始扫描"""
+        # 先停止之前的扫描线程（如果存在）
+        self.cleanup_scan_worker()
+        
         self.status_label.setText('正在扫描...')
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # 忙碌指示
@@ -459,9 +539,12 @@ class MainWindow(QMainWindow):
         # 创建进度对话框
         self.progress_dialog = QProgressDialog('正在扫描文件...', '取消', 0, 0, self)
         self.progress_dialog.setWindowTitle('扫描进度')
-        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.setWindowModality(Qt.WindowModal)
+        self.progress_dialog.setMinimumDuration(0)  # 立即显示
         self.progress_dialog.canceled.connect(self.cancel_scan)
-        self.progress_dialog.show()
+        
+        # 设置进度对话框大小
+        self.progress_dialog.setFixedSize(400, 120)
 
         # 创建工作线程
         self.scan_worker = ScanWorker(self.scanner, path, settings.get('max_depth'))
@@ -472,18 +555,28 @@ class MainWindow(QMainWindow):
         # 保存扫描设置
         self.current_scan_settings = settings
 
+    def cleanup_scan_worker(self):
+        """清理扫描工作线程"""
+        if self.scan_worker:
+            if self.scan_worker.isRunning():
+                self.scan_worker.stop()
+                self.scan_worker.quit()
+                self.scan_worker.wait(1000)  # 等待1秒
+            self.scan_worker = None
+
     def cancel_scan(self):
         """取消扫描"""
         if self.scan_worker and self.scan_worker.isRunning():
             self.scan_worker.stop()
             self.scan_worker.quit()
-            self.scan_worker.wait()
+            self.scan_worker.wait(1000)
 
         self.status_label.setText('扫描已取消')
         self.progress_bar.setVisible(False)
 
         if self.progress_dialog:
             self.progress_dialog.close()
+            self.progress_dialog = None
 
     def on_scan_finished(self, result: ScanResult):
         """扫描完成"""
@@ -493,12 +586,13 @@ class MainWindow(QMainWindow):
 
         if self.progress_dialog:
             self.progress_dialog.close()
+            self.progress_dialog = None
 
-        # 显示结果窗口
-        self.show_results_window(result)
+        # 显示结果页面（而不是新建窗口）
+        self.show_results_page(result)
 
         # 自动删除
-        if self.current_scan_settings.get('auto_delete'):
+        if self.current_scan_settings and self.current_scan_settings.get('auto_delete'):
             self.auto_delete_duplicates(result)
 
     def on_scan_error(self, error_msg: str):
@@ -508,21 +602,70 @@ class MainWindow(QMainWindow):
 
         if self.progress_dialog:
             self.progress_dialog.close()
+            self.progress_dialog = None
 
-        QMessageBox.critical(self, '扫描错误', f'扫描过程中发生错误：{error_msg}')
+        QMessageBox.critical(self, '扫描错误', f'扫描过程中发生错误：\n{error_msg}')
 
-    def show_results_window(self, result: ScanResult):
-        """显示结果窗口 - 修复任务栏图标问题"""
-        # 创建结果窗口，传入父窗口参数确保关闭行为正确
-        self.results_window = ResultsWindow(result, self)
-        self.results_window.delete_requested.connect(self.delete_files)
-        # 连接窗口关闭信号
-        self.results_window.window_closed.connect(self.on_results_window_closed)
-        # 显示窗口
-        self.results_window.show()
+    def show_results_page(self, result: ScanResult):
+        """显示结果页面 - 修复空白问题"""
+        # 清理旧的结果界面
+        self.cleanup_results_page()
 
-        # 最小化主窗口，而不是隐藏（保持任务栏图标）
-        self.showMinimized()
+        # 创建结果窗口
+        self.current_results_window = ResultsWindow(result, self)
+        self.current_results_window.delete_requested.connect(self.delete_files)
+        self.current_results_window.window_closed.connect(self.return_to_main_page)
+
+        # 将结果窗口添加到容器中（使用布局）
+        if self.results_container.layout():
+            # 清除旧布局
+            while self.results_container.layout().count():
+                item = self.results_container.layout().takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+        else:
+            # 创建新布局
+            layout = QVBoxLayout(self.results_container)
+            layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 添加新窗口
+        self.results_container.layout().addWidget(self.current_results_window)
+
+        # 切换到结果页面
+        self.stacked_widget.setCurrentWidget(self.results_page)
+
+        # 更新窗口标题
+        self.setWindowTitle(f'扫描结果 - {result.folder_path}')
+
+        # 调整窗口大小以显示内容
+        self.resize(1000, 700)
+
+    def cleanup_results_page(self):
+        """清理结果页面"""
+        # 如果已有布局，清除其中的部件
+        if self.results_container.layout():
+            while self.results_container.layout().count():
+                item = self.results_container.layout().takeAt(0)
+                if item.widget():
+                    item.widget().setParent(None)
+                    item.widget().deleteLater()
+
+    def return_to_main_page(self):
+        """返回到主页面"""
+        # 清理结果页面
+        self.cleanup_results_page()
+
+        # 清理扫描线程
+        self.cleanup_scan_worker()
+
+        # 切换到主页面
+        self.stacked_widget.setCurrentWidget(self.main_page)
+
+        # 恢复窗口标题
+        self.setWindowTitle('百度网盘工具箱')
+
+        # 更新状态
+        self.status_label.setText('已返回主窗口')
 
     def auto_delete_duplicates(self, result: ScanResult):
         """自动删除重复文件"""
@@ -541,11 +684,11 @@ class MainWindow(QMainWindow):
                 self, '自动删除确认',
                 f'扫描完成，发现 {len(delete_paths)} 个重复文件。\n'
                 f'是否按照设置自动删除？',
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
             )
 
-            if reply == QMessageBox.StandardButton.Yes:
+            if reply == QMessageBox.Yes:
                 self.delete_files(delete_paths, keep_strategy)
 
     def delete_files(self, file_paths: list, strategy: str):
@@ -575,7 +718,7 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             logger.error(f'删除文件失败: {e}')
-            QMessageBox.critical(self, '删除错误', f'删除过程中发生错误：{str(e)}')
+            QMessageBox.critical(self, '删除错误', f'删除过程中发生错误：\n{str(e)}')
 
         finally:
             self.progress_bar.setVisible(False)
@@ -586,6 +729,12 @@ class MainWindow(QMainWindow):
         self.auth_manager.logout()
         self.api_client = None
         self.scanner = None
+        
+        # 清理工作线程
+        self.cleanup_scan_worker()
+
+        # 清理结果页面
+        self.cleanup_results_page()
 
         # 切换到登录页面
         self.stacked_widget.setCurrentWidget(self.login_page)
@@ -630,17 +779,6 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, '切换失败', '切换账号失败，请重试')
 
-    def on_results_window_closed(self):
-        """结果窗口关闭时的处理"""
-        # 恢复主窗口
-        self.showNormal()
-        # 激活窗口
-        self.activateWindow()
-        # 更新状态
-        self.status_label.setText('已返回主窗口')
-        # 清除结果窗口引用
-        self.results_window = None
-
     def open_settings(self):
         """打开设置"""
         self.show_message('设置功能正在开发中...')
@@ -670,21 +808,15 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """关闭事件"""
         # 停止所有工作线程
-        if self.scan_worker and self.scan_worker.isRunning():
-            self.scan_worker.stop()
-            self.scan_worker.quit()
-            self.scan_worker.wait()
+        self.cleanup_scan_worker()
 
         # 停止刷新定时器
         if self.refresh_timer.isActive():
             self.refresh_timer.stop()
 
-        # 如果结果窗口存在且窗口对象仍然有效，关闭它
-        try:
-            if self.results_window and hasattr(self.results_window, 'isVisible'):
-                self.results_window.close()
-        except:
-            # 如果窗口已经被删除，忽略错误
-            pass
+        # 停止刷新工作线程
+        if self.refresh_worker and self.refresh_worker.isRunning():
+            self.refresh_worker.quit()
+            self.refresh_worker.wait()
 
         event.accept()
