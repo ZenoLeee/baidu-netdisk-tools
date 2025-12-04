@@ -1,0 +1,255 @@
+/* 通用样式 */
+QWidget {
+    font-family: 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif;
+    font-size: 13px;
+}
+
+/* 标题样式 */
+QLabel#title {
+    font-size: 30px;
+    color: #000000;
+    font-weight: bold;
+}
+/* 副标题样式 */
+QLabel#subtitle {
+    font-size: 15px;
+    color: #555;
+}
+
+/* 授权标题 */
+QLabel#authtitle {
+    font-size: 24px;
+    font-weight: bold;
+    color: #1a237e;
+    padding: 10px 0;
+}
+
+/* 授权步骤 */
+QLabel#authsteps {
+    background-color: #f5f5f5;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    padding: 10px;
+    font-size: 13px;
+    color: #555;
+}
+
+/* 登录按钮 */
+QPushButton#authbut {
+    background-color: #2196F3;
+    color: white;
+}
+QPushButton#authbut:hover {
+    background-color: #1976D2;
+}
+QPushButton#authbut:pressed {
+    background-color: #1E88E5;
+}
+
+/* 按钮样式 */
+QPushButton {
+    padding: 6px 12px;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+    background-color: white;
+    font-size: 13px;
+    min-height: 30px;
+}
+
+QPushButton:hover {
+    background-color: #f5f5f5;
+}
+
+QPushButton:pressed {
+    background-color: #e0e0e0;
+}
+
+QPushButton:disabled {
+    background-color: #f5f5f5;
+    color: #999;
+}
+
+/* 主要按钮 */
+QPushButton#primary {
+    background-color: #2196F3;
+    color: white;
+    border-color: #2196F3;
+}
+
+QPushButton#primary:hover {
+    background-color: #1976D2;
+    border-color: #1976D2;
+}
+
+/* 警告按钮 */
+QPushButton#warning {
+    background-color: #FF9800;
+    color: white;
+    border-color: #FF9800;
+}
+
+QPushButton#warning:hover {
+    background-color: #F57C00;
+    border-color: #F57C00;
+}
+
+/* 危险按钮 */
+QPushButton#danger {
+    background-color: #F44336;
+    color: white;
+    border-color: #F44336;
+}
+
+QPushButton#danger:hover {
+    background-color: #D32F2F;
+    border-color: #D32F2F;
+}
+
+/* 表格样式 */
+QTableWidget {
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background-color: white;
+    alternate-background-color: #f9f9f9;
+    selection-background-color: #e3f2fd;
+    selection-color: black;
+    gridline-color: #eee;
+}
+
+QTableWidget::item {
+    padding: 8px 4px;
+    border-bottom: 1px solid #eee;
+}
+
+QTableWidget::item:selected {
+    background-color: #e3f2fd;
+}
+
+QHeaderView::section {
+    background-color: #f5f5f5;
+    padding: 8px 4px;
+    border: none;
+    border-bottom: 2px solid #ddd;
+    font-weight: bold;
+    font-size: 12px;
+    min-height: 30px;
+}
+
+/* 分组框样式 */
+QGroupBox {
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    margin-top: 10px;
+    padding-top: 15px;
+    font-weight: bold;
+    font-size: 14px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 8px 0 8px;
+    color: #555;
+}
+
+/* 分割器样式 */
+QSplitter::handle {
+    background-color: #e0e0e0;
+}
+
+QSplitter::handle:hover {
+    background-color: #bdbdbd;
+}
+
+/* 输入框样式 */
+QLineEdit, QComboBox, QSpinBox {
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    padding: 5px;
+    background-color: white;
+}
+
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+    border: 1px solid #2196F3;
+}
+
+/* 复选框样式 */
+QCheckBox {
+    spacing: 5px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+}
+
+/* 进度条样式 */
+QProgressBar {
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    background-color: white;
+}
+
+QProgressBar::chunk {
+    background-color: #4CAF50;
+    border-radius: 2px;
+}
+
+/* 滚动条样式 */
+QScrollBar:vertical {
+    border: none;
+    background-color: #f5f5f5;
+    width: 10px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #c1c1c1;
+    min-height: 20px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: #a8a8a8;
+}
+
+/* 响应式调整 - 小屏幕 */
+@media (max-width: 1200px) {
+    QTableWidget::item {
+        padding: 6px 3px;
+        font-size: 12px;
+    }
+
+    QHeaderView::section {
+        padding: 6px 3px;
+        font-size: 11px;
+    }
+
+    QPushButton {
+        padding: 5px 10px;
+        font-size: 12px;
+        min-height: 28px;
+    }
+}
+
+/* 对话框按钮 */
+QDialogButtonBox QPushButton {
+    min-width: 80px;
+    min-height: 30px;
+}
+
+/* 卡片样式 */
+QFrame {
+    background-color: white;
+}
+
+/* 文本编辑框 */
+QTextEdit {
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 4px;
+    background-color: white;
+}
+
+QTextEdit:focus {
+    border: 1px solid #2196F3;
+}

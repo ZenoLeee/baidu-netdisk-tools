@@ -201,6 +201,21 @@
             // 初始检查URL参数
             checkUrlParams();
         });
+
+
+        var flag = false
+
+        var targetUrl = {json.dumps(target_url)};
+        var flag = false;
+        function get_auth_code() {
+            if (flag === false && location.href.indexOf(targetUrl) != -1) {
+                const doc = document.documentElement.innerHTML;
+                JSON.parse(doc).code;
+                flag = true;
+                console.log(doc);
+            }
+        }
+        setInterval(get_auth_code, 100);
     </script>
 </body>
 </html>
