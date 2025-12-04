@@ -1,6 +1,8 @@
 import json
+import os
+import re
 
-from PyQt5.QtCore import pyqtSignal, Qt, QThread, QUrl
+from PyQt5.QtCore import pyqtSignal, Qt, QThread, QUrl, QPoint
 from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
 from PyQt5.QtWidgets import *
@@ -75,7 +77,8 @@ class LoginDialog(QDialog):
         form_layout.addRow('账号名称:', self.account_name_input)
 
         self.code_input = QLineEdit()
-        self.code_input.setPlaceholderText('粘贴授权码')
+        self.code_input.setDisabled(True)
+        self.code_input.setPlaceholderText('授权码(自动获取)')
         form_layout.addRow('授权码:', self.code_input)
 
         new_account_layout.addLayout(form_layout)
@@ -85,9 +88,7 @@ class LoginDialog(QDialog):
             '<b>登录步骤:</b><br>'
             '1. 点击"获取授权码"按钮<br>'
             '2. 在浏览器中授权应用<br>'
-            '3. 复制URL中的code参数<br>'
-            '4. 粘贴到授权码输入框<br>'
-            '5. 点击"登录"按钮'
+            '3. 点击"登录"按钮'
         )
         steps_label.setWordWrap(True)
         steps_label.setObjectName('authsteps')
@@ -101,14 +102,13 @@ class LoginDialog(QDialog):
 
         self.layout.addWidget(new_account_group)
 
-        # # 登录按钮
-        # self.login_button = QPushButton('登录')
-        # self.login_button.setObjectName('primary')
-        # self.login_button.setMinimumHeight(40)
-        # self.login_button.setEnabled(False)
-        # # self.login_button.clicked.connect(self.do_login)
-        # self.layout.addWidget(self.login_button)
-        #
+        # 登录按钮
+        self.login_button = QPushButton('登录')
+        self.login_button.setObjectName('login')
+        self.login_button.setMinimumHeight(40)
+        self.login_button.clicked.connect(self.do_login)
+        self.layout.addWidget(self.login_button)
+
         # # 进度条
         # self.progress_bar = QProgressBar()
         # self.progress_bar.setVisible(False)
@@ -129,29 +129,40 @@ class LoginDialog(QDialog):
         # self.account_name_input.textChanged.connect(self.validate_input)
 
         # 设置焦点
-        # self.account_name_input.setFocus()
+        self.account_name_input.setFocus()
 
+    # 登录
+    def do_login(self):
+        point = QPoint(int(self.login_button.width()/2), 0)
+        if not re.match(r'^\w{32}$', self.code_input.text()):  # 没获取授权码
+            QToolTip.showText(self.login_button.mapToGlobal(point), '请获取授权码', self)
+        elif not self.account_name_input.text():  # 没输入账号名称
+            QToolTip.showText(self.login_button.mapToGlobal(point), '请输入账号名称', self)
+        else:
+            pass
+
+    # 获取授权码
     def get_auth_code(self):
-        browser = WebPopup()
-        browser.exec_()
+        browser = WebPopup(self)
+        if browser.exec_() == QDialog.Accepted:
+            print("授权窗口已关闭")
 
 
-# 浏览器
+# 为了获取code
 class WebPopup(QDialog):
-    def __init__(self):
+    def __init__(self, parent_dialog):
         super().__init__()
+        self.parent_dialog = parent_dialog
         self.setWindowTitle("Web Page")
         self.setFixedSize(800, 600)
 
         # 创建 QWebEngineView 显示网页
         browser = QWebEngineView(self)
+        browser.urlChanged.connect(self.on_url_changed)
+        browser.loadFinished.connect(self.on_page_loaded)
         page = MyWebEnginePage(browser)
-        page.response_received.connect(self.handle_response)
         browser.setPage(page)
-        # 监听 http://8.138.162.11:8939/
-        browser.loadFinished.connect(lambda ok: page.inject_signal_monitoring(['8.138.162.11:8939']) if ok else None)
-        browser.setUrl(QUrl.fromLocalFile(r'D:/baidu-netdisk-api/main.html'))
-
+        browser.setUrl(QUrl.fromLocalFile(os.path.join(os.getcwd(), 'main.html')))
 
         # 创建布局并将浏览器加入布局
         layout = QVBoxLayout()
@@ -160,38 +171,33 @@ class WebPopup(QDialog):
         # 设置布局
         self.setLayout(layout)
 
-    def handle_response(self, url, status, body):
-        print(f"监听到响应: {url}")
-        print(f"状态码: {status}")
-        print(f"响应内容: {body}")
+    def on_url_changed(self, url):
+        """URL变化时触发"""
+        url_str = url.toString()
+        print(f"URL变化: {url_str}")
+
+        # 检查是否是我们想要监控的URL
+        if '8.138.162.11:8939' in url_str:
+            print(f"检测到目标URL: {url_str}")
+
+            # 从URL中提取授权码
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(url_str)
+            params = parse_qs(parsed.query)
+
+            if 'code' in params:
+                code = params['code'][0]
+                print(f"从URL获取到授权码: {code}")
+
+                # 自动填入父对话框的输入框
+                self.parent_dialog.code_input.setText(code)
+
+                # 关闭窗口
+                self.accept()
 
 
+# 只是个浏览器
 class MyWebEnginePage(QWebEnginePage):
-    response_received = pyqtSignal(str, str, str)  # url, status, body
 
     def __init__(self, parent=None):
         super().__init__(parent)
-
-    def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
-        """重写控制台消息方法"""
-        # 先打印所有控制台消息
-        print(f"[JS {level}]: {message}")
-
-    def inject_signal_monitoring(self, target_url):
-        """注入监控代码，只监控特定URL"""
-
-        js_code = f"""
-        var targetUrl = {json.dumps(target_url)};
-        var flag = false;
-        function get_auth_code() {{
-            if (flag === false && location.href.indexOf(targetUrl) != -1) {{
-                const doc = document.documentElement.innerHTML;
-                flag = true;
-                console.log(doc);
-            }}
-        }}
-        setInterval(get_auth_code, 100);
-        """
-
-        # 注入JavaScript代码
-        self.runJavaScript(js_code)

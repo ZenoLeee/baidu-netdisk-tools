@@ -34,7 +34,7 @@ QLabel#authsteps {
     color: #555;
 }
 
-/* 登录按钮 */
+/* 授权按钮 */
 QPushButton#authbut {
     background-color: #2196F3;
     color: white;
@@ -43,6 +43,19 @@ QPushButton#authbut:hover {
     background-color: #1976D2;
 }
 QPushButton#authbut:pressed {
+    background-color: #1E88E5;
+}
+
+
+/* 登录按钮 */
+QPushButton#login {
+    background-color: #2196F3;
+    color: white;
+}
+QPushButton#login:hover {
+    background-color: #1976D2;
+}
+QPushButton#login:pressed {
     background-color: #1E88E5;
 }
 
@@ -80,6 +93,7 @@ QPushButton#primary:hover {
     background-color: #1976D2;
     border-color: #1976D2;
 }
+
 
 /* 警告按钮 */
 QPushButton#warning {

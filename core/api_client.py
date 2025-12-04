@@ -63,11 +63,9 @@ class BaiduPanAPI:
                         # 重试请求
                         params['access_token'] = self.auth.access_token
                         if method.upper() == 'GET':
-                            response = requests.get(url, params=params, headers=headers,
-                                                    timeout=self.timeout, **kwargs)
+                            response = requests.get(url, params=params, headers=headers, timeout=self.timeout, **kwargs)
                         else:
-                            response = requests.post(url, params=params, headers=headers,
-                                                     timeout=self.timeout, **kwargs)
+                            response = requests.post(url, params=params, headers=headers, timeout=self.timeout, **kwargs)
                         response.raise_for_status()
                         result = response.json()
                     else:
