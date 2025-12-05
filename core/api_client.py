@@ -89,19 +89,15 @@ class BaiduPanAPI:
 
     def get_user_info(self) -> Optional[Dict[str, Any]]:
         """获取用户信息"""
-        result = self._make_request('GET', '/rest/2.0/xpan/nas',
-                                  params={'method': 'uinfo'})
+        result = self._make_request('GET', '/rest/2.0/xpan/nas', params={'method': 'uinfo'})
         return result
 
     def get_quota(self) -> Optional[Dict[str, Any]]:
         """获取网盘配额信息"""
-        result = self._make_request('GET', '/api/quota',
-                                  params={'checkfree': 1, 'checkexpire': 1})
+        result = self._make_request('GET', '/api/quota', params={'checkfree': 1, 'checkexpire': 1})
         return result
 
-    def list_files(self, path: str = '/', start: int = 0,
-                  limit: int = 1000, order: str = 'name',
-                  desc: int = 0) -> List[Dict[str, Any]]:
+    def list_files(self, path: str = '/', start: int = 0, limit: int = 1000, order: str = 'name', desc: int = 0) -> List[Dict[str, Any]]:
         """
         列出文件
 
@@ -133,94 +129,6 @@ class BaiduPanAPI:
             else:
                 logger.error("获取文件列表失败: 请求返回空")
             return []
-
-    def get_all_files(self, progress_callback: Callable[[int, str], None] = None) -> List[FileInfo]:
-        """
-        获取网盘所有文件（包括子目录）- 增强版
-
-        Args:
-            progress_callback: 进度回调函数，参数：(已处理文件数, 当前处理的文件夹路径)
-        """
-        logger.info('开始获取网盘所有文件...')
-        all_files = []
-        processed_count = 0
-        total_dirs_processed = 0
-
-        # 根目录队列，元素为(路径, 深度)
-        dir_queue = [('/', 0)]
-        total_dirs = 1  # 初始为根目录
-
-        while dir_queue:
-            current_path, current_depth = dir_queue.pop(0)
-            total_dirs_processed += 1
-
-            if progress_callback:
-                progress_callback(processed_count, f'正在扫描: {current_path} ({total_dirs_processed}/{total_dirs})')
-
-            logger.debug(f'正在处理目录: {current_path} (深度: {current_depth})')
-
-            # 分页获取目录内容
-            start = 0
-            limit = 1000
-            has_more = True
-
-            while has_more:
-                try:
-                    items = self.list_files(
-                        path=current_path,
-                        start=start,
-                        limit=limit,
-                        order='name',
-                        desc=0
-                    )
-
-                    if not items:
-                        break
-
-                    for item in items:
-                        if item.get('isdir') == 1:
-                            # 文件夹，加入队列
-                            dir_path = item.get('path', '')
-                            if dir_path:
-                                dir_queue.append((dir_path, current_depth + 1))
-                                total_dirs += 1
-                        else:
-                            # 文件
-                            try:
-                                file_info = FileInfo(
-                                    name=str(item.get('server_filename', '')),
-                                    size=int(item.get('size', 0)),
-                                    path=str(item.get('path', '')),
-                                    md5=str(item.get('md5', '')),
-                                    server_mtime=int(item.get('server_mtime', 0)),
-                                    is_dir=False
-                                )
-                                all_files.append(file_info)
-                                processed_count += 1
-
-                                # 每处理50个文件调用一次进度回调
-                                if processed_count % 50 == 0 and progress_callback:
-                                    progress_callback(processed_count,
-                                                      f'已找到 {processed_count} 个文件，当前目录: {current_path}')
-
-                            except (ValueError, TypeError) as e:
-                                logger.error(f'解析文件信息失败: {e}, 原始数据: {item}')
-
-                    # 检查是否还有更多
-                    if len(items) < limit:
-                        has_more = False
-                    else:
-                        start += limit
-
-                    # 控制请求频率，避免被限制
-                    time.sleep(0.15)
-
-                except Exception as e:
-                    logger.error(f'获取目录 {current_path} 内容失败: {e}')
-                    break
-
-        logger.info(f'文件获取完成，共扫描 {total_dirs} 个目录，找到 {len(all_files)} 个文件')
-        return all_files
 
     def get_folders(self, path: str = '/') -> List[Dict[str, Any]]:
         """

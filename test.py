@@ -4,37 +4,9 @@ import logging
 import time
 import requests
 
+from utils.logger import get_logger
 
-class ColorFormatter(logging.Formatter):
-    COLORS = {
-        'DEBUG': '\033[94m',
-        'INFO': '\033[92m',
-        'WARNING': '\033[93m',
-        'ERROR': '\033[91m',
-    }
-    RESET = '\033[0m'
-
-    def format(self, record):
-        color = self.COLORS.get(record.levelname, self.RESET)
-        fmt = f"{color}%(asctime)s - %(levelname)s - %(message)s{self.RESET}"
-        formatter = logging.Formatter(fmt, datefmt='%Y-%m-%d %H:%M:%S')
-        return formatter.format(record)
-
-
-def get_logger(name=None, level=logging.INFO):
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-
-    if not logger.hasHandlers():
-        ch = logging.StreamHandler()
-        ch.setLevel(level)
-        ch.setFormatter(ColorFormatter())
-        logger.addHandler(ch)
-
-    return logger
-
-
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 class BaiduPanAPI:
