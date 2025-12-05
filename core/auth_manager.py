@@ -3,9 +3,7 @@
 """
 import json
 import time
-import os
 from typing import Optional, Dict, Any, List
-from urllib.parse import urlencode
 import webbrowser
 
 import requests
@@ -39,7 +37,7 @@ class AuthManager:
         logger.info(f"打开授权URL: {auth_url}")
         webbrowser.open(auth_url)
 
-    def get_access_token(self, code: str, account_name: str = '默认账号') -> Dict[str, Any]:
+    def get_access_token(self, code: str, account_name: str) -> Dict[str, Any]:
         """使用授权码获取访问令牌"""
         url = f'https://openapi.baidu.com/oauth/2.0/token'
         params = {
@@ -82,7 +80,6 @@ class AuthManager:
             'refresh_token': token_data.get('refresh_token', ''),
             'expires_at': expires_at,
             'code': code,
-            'created_at': time.time(),
             'last_used': time.time()
         }
 
@@ -93,7 +90,6 @@ class AuthManager:
         # 更新配置
         self.config.update({
             'accounts': accounts,
-            'current_account': account_name
         })
         self.config.save()
 
@@ -115,7 +111,7 @@ class AuthManager:
 
         # 更新最后使用时间
         accounts[account_name]['last_used'] = time.time()
-        self.config.update({'accounts': accounts, 'current_account': account_name})
+        self.config.update({'accounts': accounts})
         self.config.save()
 
         logger.info(f'已切换到账号: {account_name}')
@@ -123,7 +119,7 @@ class AuthManager:
 
     def refresh_access_token(self) -> bool:
         """刷新当前账号的访问令牌"""
-        if not self.refresh_token or not self.current_account:
+        if not self.refresh_token:
             logger.error('没有可用的刷新令牌或当前账号')
             return False
 

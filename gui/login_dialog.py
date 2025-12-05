@@ -155,19 +155,18 @@ class LoginDialog(QDialog):
         self.login_button.setDisabled(True)
         self.login_button.setStyleSheet("QPushButton{background-color: #838B8B;}")  # 禁用按钮
 
-
         # 新账号需要验证, 旧账号需要获取信息
         self.validate_account()
 
-    def validate_account(self):
-
-        pass
+    def validate_account(self, is_new=True):
+        if is_new:
+            self.auth_manager.get_access_token(self.code_input.text(), self.account_name_input.text())
 
     # 获取授权码
     def get_auth_code(self):
         browser = WebPopup(self)
         if browser.exec_() == QDialog.Accepted:
-            print("授权窗口已关闭")
+            logger.info(f'授权码获取成功')
 
     # 加载已保存的账号
     def load_accounts(self):
