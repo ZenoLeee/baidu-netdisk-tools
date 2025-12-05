@@ -26,6 +26,7 @@ class LoginDialog(QDialog):
         # self.setup_timer()
         # self.setup_refresh_button()
         # self.setup_account_switch_dialog()
+        self.auth_manager = AuthManager()  # 添加AuthManager实例
 
     def setup_ui(self):
         """设置UI - 简洁实用版"""
@@ -140,13 +141,27 @@ class LoginDialog(QDialog):
     # 登录
     def do_login(self):
         point = QPoint(int(self.login_button.width()/2), 0)
-        if not self.account_list.selectedItems() and not re.match(r'^\w{32}$', self.code_input.text()):  # 没获取授权码
+
+        # 没获取授权码
+        if not self.account_list.selectedItems() and not re.match(r'^\w{32}$', self.code_input.text()):
             QToolTip.showText(self.login_button.mapToGlobal(point), '请获取授权码登录或选择账号登录', self)
-        elif not self.account_name_input.text():  # 没输入账号名称
+            return
+
+        # 没输入账号名称
+        if not self.account_name_input.text() and not self.account_list.selectedItems():
             QToolTip.showText(self.login_button.mapToGlobal(point), '请输入账号名称(唯一标识)', self)
-        else:
-            # TODO 登录操作
-            pass
+            return
+
+        self.login_button.setDisabled(True)
+        self.login_button.setStyleSheet("QPushButton{background-color: #838B8B;}")  # 禁用按钮
+
+
+        # 新账号需要验证, 旧账号需要获取信息
+        self.validate_account()
+
+    def validate_account(self):
+
+        pass
 
     # 获取授权码
     def get_auth_code(self):
@@ -167,6 +182,12 @@ class LoginDialog(QDialog):
 
         if self.config and 'accounts' in self.config:
             for account_name in self.config['accounts']:
+                # 账号信息不完整
+                if any(k not in self.config['accounts'][account_name] for k in ['access_token', 'refresh_token', 'expires_at', 'code', 'account_name'])\
+                        or any(not str(k).strip() for k in self.config['accounts'][account_name].values()):
+                    logger.warning(f'账号：{account_name}，缺少必要参数，请检查账号信息完整性')
+                    continue
+
                 self.account_list.addItem(account_name)
             self.account_list.setCurrentRow(0)  # 设置默认选中
 
@@ -200,7 +221,6 @@ class WebPopup(QDialog):
         # 创建 QWebEngineView 显示网页
         browser = QWebEngineView(self)
         browser.urlChanged.connect(self.on_url_changed)
-        browser.loadFinished.connect(self.on_page_loaded)
         page = MyWebEnginePage(browser)
         browser.setPage(page)
         browser.setUrl(QUrl.fromLocalFile(os.path.join(os.getcwd(), 'main.html')))
