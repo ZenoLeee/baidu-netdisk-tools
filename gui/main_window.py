@@ -96,8 +96,12 @@ class MainWindow(QMainWindow):
         # self.refresh_cooldown_seconds = 0
         # self.refresh_worker = None
 
+        # 当前用户信息
+        self.current_account = None
+
         # 设置UI
         self.setup_ui()
+        # self.setup_main_page()
         # self.setup_connections()
 
         # 检查登录状态
@@ -191,10 +195,10 @@ class MainWindow(QMainWindow):
         #
         # main_layout.addWidget(functions_frame)
         #
-        # # 添加到堆叠窗口
-        # self.stacked_widget.addWidget(main_page)
-        # self.main_page = main_page
-        # self.main_page_index = self.stacked_widget.indexOf(main_page)
+        # 添加到堆叠窗口
+        self.stacked_widget.addWidget(main_page)
+        self.main_page = main_page
+        self.main_page_index = self.stacked_widget.indexOf(main_page)
 
     # 登录页面
     def setup_login_page(self):
@@ -245,8 +249,56 @@ class MainWindow(QMainWindow):
         self.stacked_widget.addWidget(login_page)
         self.login_page = login_page
 
+    def on_login_success(self, account_name, is_new_account):
+        """登录成功处理"""
+        print(f"=== 开始处理登录成功信号 ===")
+        print(f"1. 账号: {account_name}")
+        print(f"2. 新账号: {is_new_account}")
+
+        # 检查主页面是否存在
+        print(f"3. 主页面存在: {hasattr(self, 'main_page')}")
+        if hasattr(self, 'main_page'):
+            print(f"4. 主页面索引: {self.stacked_widget.indexOf(self.main_page)}")
+        else:
+            print("4. 错误：主页面不存在！")
+            return
+
+        self.current_account = account_name
+        print(f"5. 当前账号已保存: {self.current_account}")
+        self.stacked_widget.setCurrentWidget(self.main_page)
+        # self.update_user_info()
+        print("6. 用户信息已更新")
+
+        self.switch_to_main_page()
+        print("7. 已尝试切换页面")
+        print(f"=== 登录成功处理完成 ===")
+
+    # 切换登录后主页面
+    def switch_to_main_page(self):
+        """切换到主页面"""
+        print(f"切换页面前：当前页面数 = {self.stacked_widget.count()}")
+        print(f"主页面对象是否存在：{hasattr(self, 'main_page')}")
+
+        if hasattr(self, 'main_page') and self.main_page:
+            # 获取主页面索引
+            main_page_index = self.stacked_widget.indexOf(self.main_page)
+            print(f"主页面索引: {main_page_index}")
+
+            # 切换到主页面
+            self.stacked_widget.setCurrentWidget(self.main_page)
+            print(f"切换页面后：当前页面索引 = {self.stacked_widget.currentIndex()}")
+
+            # 更新窗口标题
+            self.setWindowTitle(f'百度网盘工具箱 - {self.current_account}')
+
+            # 更新状态栏
+            self.statusBar().showMessage(f"已登录: {self.current_account}", 3000)
+        else:
+            print("错误：主页面未创建或未找到")
+
+    # 授权页面
     def open_authorization_dialog(self):
-        login_dialog = LoginDialog()
+        login_dialog = LoginDialog(self)
 
         # 连接登录成功信号
         login_dialog.login_success.connect(self.on_login_success)
@@ -256,6 +308,7 @@ class MainWindow(QMainWindow):
         self.setEnabled(True)  # 恢复主窗口
 
         # 如果用户取消登录
+        print(f"对话框关闭，结果: {result}")
         if result == QDialog.Rejected:
             print("用户取消登录")
 

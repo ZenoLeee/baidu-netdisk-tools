@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 
 from PyQt5.QtCore import pyqtSignal, Qt, QThread, QUrl, QPoint
 from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
@@ -16,6 +17,8 @@ logger = get_logger(__name__)
 
 
 class LoginDialog(QDialog):
+    login_success = pyqtSignal(str, bool)  # 添加成功信号，传递账号名和是否是新账号
+
     """登录对话框"""
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -26,7 +29,8 @@ class LoginDialog(QDialog):
         # self.setup_timer()
         # self.setup_refresh_button()
         # self.setup_account_switch_dialog()
-        self.baidu_api = BaiduPanAPI()  # 添加AuthManager实例
+        self.baidu_api = BaiduPanAPI()
+        self.worker = None  # 添加工作线程引用
 
     def setup_ui(self):
         """设置UI - 简洁实用版"""
@@ -52,8 +56,6 @@ class LoginDialog(QDialog):
 
         self.account_list = QListWidget()
         self.account_list.setMaximumHeight(200)
-        # self.account_list.addItem("11111111111111")
-        # self.account_list.itemClicked.connect(self.on_account_selected)
         self.account_list.itemDoubleClicked.connect(self.on_double_clicked)
         saved_accounts_layout.addWidget(self.account_list)
 
@@ -152,20 +154,24 @@ class LoginDialog(QDialog):
             QToolTip.showText(self.login_button.mapToGlobal(point), '请输入账号名称(唯一标识)', self)
             return
 
-        self.login_button.setDisabled(True)
-        self.login_button.setStyleSheet("QPushButton{background-color: #838B8B;}")  # 禁用按钮
+        # self.login_button.setDisabled(True)
+        # self.login_button.setStyleSheet("QPushButton{background-color: #838B8B;}")  # 禁用按钮
 
         # 新账号需要验证, 旧账号需要获取信息
         self.validate_account()
 
     def validate_account(self, is_new=True):
-        # TODO 转跳登录后页面
-        pass
-        # if is_new:
-        #     data = self.baidu_api.get_access_token(self.code_input.text(), self.account_name_input.text())
-        #     if not data['success']:
-        #         QMessageBox.critical(self, '错误', data['message'])
-        #         return
+        # 禁用UI
+        self.login_button.setDisabled(True)
+        self.login_button.setText('验证中...')
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+
+        # 创建验证工作线程
+        self.worker = ValidationWorker(self.baidu_api, is_new, self)
+        self.worker.finished.connect(self.on_validation_finished)
+        self.worker.error.connect(self.on_validation_error)
+        self.worker.start()
 
     # 获取授权码
     def get_auth_code(self):
@@ -210,8 +216,103 @@ class LoginDialog(QDialog):
 
     # 双击账号
     def on_double_clicked(self, item):
-        # TODO 登录操作
-        logger.info(item)
+        self.account_list.setDisabled(True)
+        self.validate_account(False)
+
+    # 验证完成
+    def on_validation_finished(self, result):
+        self.login_button.setDisabled(False)
+        self.login_button.setText('登录')
+        self.progress_bar.setVisible(False)
+        self.account_list.setEnabled(True)
+
+        account_name = result.get('account_name')
+        is_new_account = result.get('is_new', True)
+        # 发送登录成功信号
+        self.login_success.emit(account_name, is_new_account)
+        print(f"登录成功，发射信号: {account_name}, {is_new_account}")
+        self.accept()
+
+    # 验证失败
+    def on_validation_error(self, error):
+        self.login_button.setDisabled(False)
+        self.login_button.setText('登录')
+        self.progress_bar.setVisible(False)
+        self.show_error_popup('登录失败', error)
+
+    # 显示错误提示框
+    def show_error_popup(self, title, message):
+        """弹出错误提示框"""
+        error_msg = QMessageBox(self)
+        error_msg.setIcon(QMessageBox.Critical)
+        error_msg.setText(message)
+        error_msg.setWindowTitle(title)
+        error_msg.setStandardButtons(QMessageBox.Ok)
+        error_msg.exec_()
+
+
+
+# 添加验证工作线程类
+class ValidationWorker(QThread):
+    """验证工作线程"""
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, baidu_api, is_new, login_dialog):
+        super().__init__()
+        self.baidu_api = baidu_api
+        self.is_new = is_new
+        self.login_dialog = login_dialog
+
+    def run(self):
+        try:
+            # 新账号：使用授权码获取token
+            if self.is_new:
+
+
+                code = self.login_dialog.code_input.text().strip()
+                account_name = self.login_dialog.account_name_input.text().strip()
+
+                api_result = self.baidu_api.get_access_token(code, account_name)
+
+                if api_result['success']:
+                    result = {
+                        'success': True,
+                        'account_name': account_name,
+                        'is_new': self.is_new,
+                        'data': api_result.get('data')
+                    }
+                else:
+                    result = {
+                        'success': False,
+                        'error': api_result['error']
+                    }
+                return self.finished.emit(result)
+
+            # 已存在的账号：检测token并获取信息
+            account_info = self.login_dialog.config['accounts'][self.login_dialog.account_list.selectedItems()[0].text()]
+
+            # 刷新token
+            if account_info['expires_at'] <= time.time() + 86400:
+                if not self.baidu_api.refresh_access_token():
+                    return self.error.emit('刷新token失败')
+
+            api_result = self.baidu_api.get_user_info()
+
+            if isinstance(api_result, str):
+                return self.error.emit(api_result)
+
+            # 模拟验证成功
+            result = {
+                'success': True,
+                'account_name': api_result['baidu_name'],
+                'is_new': self.is_new
+            }
+
+            self.finished.emit(result)
+
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 # 为了获取code

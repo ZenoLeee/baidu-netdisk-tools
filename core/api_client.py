@@ -138,7 +138,7 @@ class BaiduPanAPI:
                 self.switch_account(account_name)
 
                 logger.info(f'成功获取访问令牌，账号: {account_name}')
-                return {'success': True, 'data': data, 'account_name': account_name}
+                return {'success': True, 'data': account_data, 'account_name': account_name}
             else:
                 error_msg = data.get('error_description', '未知错误')
                 logger.error(f'获取访问令牌失败: {error_msg}')
@@ -198,7 +198,7 @@ class BaiduPanAPI:
             return False
 
     # 其他原有API方法保持不变
-    def _make_request(self, method: str, endpoint: str, **kwargs) -> Optional[Dict[str, Any]]:
+    def _make_request(self, method: str, endpoint: str, **kwargs) -> Optional[Dict[str, Any]] |  Any:
         """发送请求"""
         if not self.is_authenticated():
             logger.error('未认证，请先登录')
@@ -220,7 +220,7 @@ class BaiduPanAPI:
                 response = requests.post(url, params=params, timeout=self.timeout, **kwargs)
             else:
                 logger.error(f'不支持的HTTP方法: {method}')
-                return None
+                return f'不支持的HTTP方法: {method}'
 
             response.raise_for_status()
             result = response.json()
@@ -242,22 +242,22 @@ class BaiduPanAPI:
                         result = response.json()
                     else:
                         logger.error('刷新令牌失败，请重新登录')
-                        return None
+                        return '刷新令牌失败，请重新登录'
 
             return result
 
         except requests.Timeout:
             logger.error(f'请求超时: {url}')
-            return None
+            return f'请求超时: {url}'
         except requests.ConnectionError:
             logger.error(f'网络连接错误: {url}')
-            return None
+            return f'网络连接错误: {url}'
         except requests.RequestException as e:
             logger.error(f'API请求失败: {e}')
-            return None
+            return f'API请求失败: {e}'
         except json.JSONDecodeError as e:
             logger.error(f'JSON解析失败: {e}')
-            return None
+            return f'JSON解析失败: {e}'
 
     def get_user_info(self) -> Optional[Dict[str, Any]]:
         """获取用户信息"""
