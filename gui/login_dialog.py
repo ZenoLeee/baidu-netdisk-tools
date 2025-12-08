@@ -7,7 +7,7 @@ from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
 from PyQt5.QtWidgets import *
 
-from core.auth_manager import AuthManager
+from core.api_client import BaiduPanAPI
 from gui.style import AppStyles
 from utils.logger import get_logger
 import webbrowser
@@ -26,7 +26,7 @@ class LoginDialog(QDialog):
         # self.setup_timer()
         # self.setup_refresh_button()
         # self.setup_account_switch_dialog()
-        self.auth_manager = AuthManager()  # 添加AuthManager实例
+        self.baidu_api = BaiduPanAPI()  # 添加AuthManager实例
 
     def setup_ui(self):
         """设置UI - 简洁实用版"""
@@ -159,8 +159,13 @@ class LoginDialog(QDialog):
         self.validate_account()
 
     def validate_account(self, is_new=True):
-        if is_new:
-            self.auth_manager.get_access_token(self.code_input.text(), self.account_name_input.text())
+        # TODO 转跳登录后页面
+        pass
+        # if is_new:
+        #     data = self.baidu_api.get_access_token(self.code_input.text(), self.account_name_input.text())
+        #     if not data['success']:
+        #         QMessageBox.critical(self, '错误', data['message'])
+        #         return
 
     # 获取授权码
     def get_auth_code(self):

@@ -4,7 +4,7 @@
 
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer, QDateTime
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QFont
 
 # 根据你的实际项目结构取消注释以下导入
 # from gui.styles import AppStyles
@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
 
         # 检查登录状态
         # self.check_auth_status()
+        self.stacked_widget.setCurrentWidget(self.login_page)
 
     def setup_ui(self):
 
@@ -127,13 +128,73 @@ class MainWindow(QMainWindow):
 
         # 创建页面
         self.setup_login_page()
-        # self.setup_main_page()
+        self.setup_main_page()
 
         # 创建状态栏
         self.setup_statusbar()
 
         # 创建菜单栏
         self.setup_menubar()
+
+    def setup_main_page(self):
+        """设置主页面（登录后的页面）"""
+        main_page = QWidget()
+        main_layout = QVBoxLayout(main_page)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(20)
+
+        # 标题
+        title_label = QLabel('主页面 - 欢迎使用百度网盘工具箱')
+        title_label.setAlignment(Qt.AlignCenter)
+        title_font = QFont()
+        title_font.setPointSize(18)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setStyleSheet("color: #2c3e50; padding: 20px;")
+        main_layout.addWidget(title_label)
+
+        # 用户信息卡片
+        user_card = QFrame()
+        user_card.setObjectName('card')
+        user_card.setMaximumHeight(150)
+        user_layout = QVBoxLayout(user_card)
+
+        self.user_info_label = QLabel('用户: 未登录')
+        self.user_info_label.setStyleSheet("font-size: 16px; padding: 10px;")
+        user_layout.addWidget(self.user_info_label)
+
+        main_layout.addWidget(user_card)
+
+        # 功能按钮区域
+        functions_frame = QFrame()
+        functions_frame.setObjectName('card')
+        functions_layout = QVBoxLayout(functions_frame)
+
+        # # 功能按钮1
+        # scan_btn = QPushButton('🔍 扫描重复文件')
+        # scan_btn.setMinimumHeight(50)
+        # scan_btn.clicked.connect(self.on_scan_clicked)
+        # functions_layout.addWidget(scan_btn)
+        #
+        # # 功能按钮2
+        # manage_btn = QPushButton('📁 文件管理')
+        # manage_btn.setMinimumHeight(50)
+        # manage_btn.clicked.connect(self.on_manage_clicked)
+        # functions_layout.addWidget(manage_btn)
+        #
+        # # 退出登录按钮
+        # logout_btn = QPushButton('退出登录')
+        # logout_btn.setObjectName('danger')
+        # logout_btn.setMinimumHeight(40)
+        # logout_btn.clicked.connect(self.logout)
+        # functions_layout.addWidget(logout_btn)
+        #
+        # main_layout.addWidget(functions_frame)
+        #
+        # # 添加到堆叠窗口
+        # self.stacked_widget.addWidget(main_page)
+        # self.main_page = main_page
+        # self.main_page_index = self.stacked_widget.indexOf(main_page)
 
     # 登录页面
     def setup_login_page(self):
@@ -186,9 +247,17 @@ class MainWindow(QMainWindow):
 
     def open_authorization_dialog(self):
         login_dialog = LoginDialog()
+
+        # 连接登录成功信号
+        login_dialog.login_success.connect(self.on_login_success)
+
         self.setEnabled(False)
-        login_dialog.exec_()
+        result = login_dialog.exec_()
         self.setEnabled(True)  # 恢复主窗口
+
+        # 如果用户取消登录
+        if result == QDialog.Rejected:
+            print("用户取消登录")
 
     # 状态栏
     def setup_statusbar(self):

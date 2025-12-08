@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
+from utils.config_manager import ConfigManager
 from utils.logger import get_logger
-from core.auth_manager import AuthManager
 from core.models import FileInfo
 
 logger = get_logger(__name__)
@@ -17,35 +17,207 @@ logger = get_logger(__name__)
 class BaiduPanAPI:
     """百度网盘API客户端"""
 
-    def __init__(self, auth_manager: AuthManager):
-        self.auth = auth_manager
+    def __init__(self):
+        self.config = ConfigManager()
+        self.client_id = self.config.get('client_id', 'mu79W8Z84iu8eV6cUvru2ckcGtsz5bxL')
+        self.client_secret = self.config.get('client_secret', 'K0AVQhS6RyWg2ZNCo4gzdGSftAa4BjIE')
+        self.redirect_uri = self.config.get('redirect_uri', 'http://8.138.162.11:8939/')
         self.host = 'https://pan.baidu.com'
-        self.timeout = 30
+        self.timeout = 10
         self._executor = ThreadPoolExecutor(max_workers=5)
 
+        # 认证状态
+        self.current_account: Optional[str] = None
+        self.access_token: Optional[str] = None
+        self.refresh_token: Optional[str] = None
+        self.expires_at: Optional[float] = None
+
+        # 加载当前账号
+        self._load_current_account()
+
+    # 认证管理方法
+    def _load_current_account(self) -> bool:
+        """加载当前账号"""
+        current_account = self.config.get_current_account()
+
+        # 如果没有设置当前账号，尝试加载最近使用的账号
+        if not current_account:
+            current_account = self.config.load_last_used_account()
+            if current_account:
+                self.config.set_current_account(current_account)
+
+        if not current_account:
+            return False
+
+        return self.switch_account(current_account)
+
+    def switch_account(self, account_name: str) -> bool:
+        """切换到指定账号"""
+        if not self.config.switch_account(account_name):
+            return False
+
+        # 加载账号数据
+        account_data = self.config.get_account_data(account_name)
+        if not account_data:
+            return False
+
+        self.current_account = account_name
+        self.access_token = account_data.get('access_token')
+        self.refresh_token = account_data.get('refresh_token')
+        self.expires_at = account_data.get('expires_at')
+
+        logger.info(f'已切换到账号: {account_name}')
+        return True
+
+    def get_all_accounts(self) -> List[str]:
+        """获取所有已保存的账号"""
+        return self.config.get_all_accounts()
+
+    def delete_account(self, account_name: str) -> bool:
+        """删除指定账号"""
+        # 如果删除的是当前账号，先清除当前状态
+        if self.current_account == account_name:
+            self.logout()
+
+        return self.config.delete_account(account_name)
+
+    def logout(self):
+        """退出登录（只重置当前状态，不清除tokens）"""
+        self.current_account = None
+        self.access_token = None
+        self.refresh_token = None
+        self.expires_at = None
+        logger.info('已退出登录（tokens已保留）')
+
+    def is_authenticated(self) -> bool:
+        """检查是否已认证"""
+        if not self.access_token or not self.current_account:
+            return self._load_current_account()
+
+        # 检查令牌是否过期
+        if self.expires_at and time.time() > self.expires_at - 300:  # 提前5分钟刷新
+            logger.info('访问令牌即将过期，尝试刷新...')
+            return self.refresh_access_token()
+
+        return True
+
+    def get_access_token(self, code: str, account_name: str) -> Dict[str, Any]:
+        """使用授权码获取访问令牌"""
+        url = f'https://openapi.baidu.com/oauth/2.0/token'
+        params = {
+            'grant_type': 'authorization_code',
+            'code': code,
+            'client_id': self.client_id,
+            'client_secret': self.client_secret,
+            'redirect_uri': self.redirect_uri
+        }
+
+        try:
+            response = requests.post(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            if 'access_token' in data:
+                self.current_account = account_name
+                self.access_token = data['access_token']
+                # 获取账户名称
+                user_info = self.get_user_info()
+                # 保存账号信息
+                account_data = {
+                    'account_name': user_info['baidu_name'],
+                    'access_token': data['access_token'],
+                    'refresh_token': data['refresh_token'],
+                    'expires_at': time.time() + data.get('expires_in', 2592000),
+                    'code': code,
+                    'last_used': time.time()
+                }
+
+                self.config.save_account_data(account_name, account_data)
+
+                # 切换到新账号
+                self.switch_account(account_name)
+
+                logger.info(f'成功获取访问令牌，账号: {account_name}')
+                return {'success': True, 'data': data, 'account_name': account_name}
+            else:
+                error_msg = data.get('error_description', '未知错误')
+                logger.error(f'获取访问令牌失败: {error_msg}')
+                return {'success': False, 'error': error_msg}
+
+        except requests.RequestException as e:
+            logger.error(f'请求失败: {e}')
+            return {'success': False, 'error': str(e)}
+        except json.JSONDecodeError as e:
+            logger.error(f'JSON解析失败: {e}')
+            return {'success': False, 'error': '响应格式错误'}
+
+    def refresh_access_token(self) -> bool:
+        """刷新当前账号的访问令牌"""
+        if not self.refresh_token or not self.current_account:
+            logger.error('没有可用的刷新令牌或当前账号')
+            return False
+
+        url = f'https://openapi.baidu.com/oauth/2.0/token'
+        params = {
+            'grant_type': 'refresh_token',
+            'refresh_token': self.refresh_token,
+            'client_id': self.client_id,
+            'client_secret': self.client_secret
+        }
+
+        try:
+            response = requests.post(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            if 'access_token' in data:
+                # 更新账号数据
+                expires_at = time.time() + data.get('expires_in', 2592000)
+                updates = {
+                    'access_token': data['access_token'],
+                    'refresh_token': data.get('refresh_token', self.refresh_token),
+                    'expires_at': expires_at,
+                    'last_used': time.time()
+                }
+
+                self.config.update_account_data(self.current_account, updates)
+
+                # 更新当前状态
+                self.access_token = data['access_token']
+                self.refresh_token = data.get('refresh_token', self.refresh_token)
+                self.expires_at = expires_at
+
+                logger.info('成功刷新访问令牌')
+                return True
+            else:
+                logger.error(f'刷新令牌失败: {data}')
+                return False
+
+        except requests.RequestException as e:
+            logger.error(f'刷新令牌请求失败: {e}')
+            return False
+
+    # 其他原有API方法保持不变
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Optional[Dict[str, Any]]:
         """发送请求"""
-        if not self.auth.is_authenticated():
+        if not self.is_authenticated():
             logger.error('未认证，请先登录')
             return None
 
         url = f"{self.host}{endpoint}"
-        headers = kwargs.pop('headers', {})
         params = kwargs.pop('params', {})
 
         # 添加访问令牌
         if 'access_token' not in params:
-            params['access_token'] = self.auth.access_token
+            params['access_token'] = self.access_token
 
         try:
             logger.debug(f'发送 {method} 请求到 {endpoint}')
 
             if method.upper() == 'GET':
-                response = requests.get(url, params=params, headers=headers,
-                                        timeout=self.timeout, **kwargs)
+                response = requests.get(url, params=params, timeout=self.timeout, **kwargs)
             elif method.upper() == 'POST':
-                response = requests.post(url, params=params, headers=headers,
-                                         timeout=self.timeout, **kwargs)
+                response = requests.post(url, params=params, timeout=self.timeout, **kwargs)
             else:
                 logger.error(f'不支持的HTTP方法: {method}')
                 return None
@@ -59,13 +231,13 @@ class BaiduPanAPI:
                 # 如果令牌失效，尝试刷新
                 if result.get('errno') in [110, 111]:  # 常见的认证错误码
                     logger.info('检测到认证失效，尝试刷新令牌...')
-                    if self.auth.refresh_access_token():
+                    if self.refresh_access_token():
                         # 重试请求
-                        params['access_token'] = self.auth.access_token
+                        params['access_token'] = self.access_token
                         if method.upper() == 'GET':
-                            response = requests.get(url, params=params, headers=headers, timeout=self.timeout, **kwargs)
+                            response = requests.get(url, params=params, timeout=self.timeout, **kwargs)
                         else:
-                            response = requests.post(url, params=params, headers=headers, timeout=self.timeout, **kwargs)
+                            response = requests.post(url, params=params, timeout=self.timeout, **kwargs)
                         response.raise_for_status()
                         result = response.json()
                     else:
@@ -151,42 +323,6 @@ class BaiduPanAPI:
 
         return folders
 
-    def get_file_metas(self, file_paths: List[str]) -> List[Dict[str, Any]]:
-        """
-        批量获取文件元数据
-
-        Args:
-            file_paths: 文件路径列表，最多100个
-        """
-        if not file_paths:
-            return []
-
-        # 限制一次查询的数量
-        batch_size = 100
-        all_metas = []
-
-        for i in range(0, len(file_paths), batch_size):
-            batch_paths = file_paths[i:i + batch_size]
-
-            params = {
-                'method': 'filemetas',
-                'dlink': 1,
-                'fsids': json.dumps([self._get_fsid_from_path(p) for p in batch_paths])
-            }
-
-            result = self._make_request('GET', '/rest/2.0/xpan/multimedia', params=params)
-
-            if result and result.get('errno') == 0:
-                all_metas.extend(result.get('list', []))
-            else:
-                logger.warning(f'获取文件元数据失败: {result}')
-
-            # 控制频率
-            if i + batch_size < len(file_paths):
-                time.sleep(0.2)
-
-        return all_metas
-
     def _get_fsid_from_path(self, path: str) -> str:
         """
         从路径获取fsid
@@ -240,10 +376,7 @@ class BaiduPanAPI:
         """
         return self._get_fsid_from_path(path)
 
-    def get_all_files_realtime(self,
-                               progress_callback: Callable[[int, str], None] = None,
-                               batch_callback: Callable[[List[FileInfo]], None] = None,
-                               batch_size: int = 100) -> List[FileInfo]:
+    def get_all_files_realtime(self, progress_callback: Callable[[int, str], None] = None, batch_callback: Callable[[List[FileInfo]], None] = None, batch_size: int = 100) -> List[FileInfo]:
         """
         实时获取网盘所有文件（一边获取一边回调）
 
@@ -513,9 +646,7 @@ class BaiduPanAPI:
                 logger.error("创建文件夹失败: 请求返回空")
             return False
 
-    def search_files(self, keyword: str, path: str = '/',
-                    recursion: int = 1, start: int = 0,
-                    limit: int = 1000) -> List[Dict[str, Any]]:
+    def search_files(self, keyword: str, path: str = '/', recursion: int = 1, start: int = 0, limit: int = 1000) -> List[Dict[str, Any]]:
         """
         搜索文件
 
