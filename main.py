@@ -9,7 +9,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 from gui.main_window import MainWindow
 from gui.login_dialog import LoginDialog
@@ -32,16 +32,13 @@ def main():
         if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
             app.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
-        # # 创建主窗口
-        # window = MainWindow()
-        # window.show()
-
-        window = LoginDialog()
+        # 创建主窗口
+        window = MainWindow()
         window.show()
 
-        #
+
         # # 检查是否需要直接显示登录对话框
-        # if window.auth_manager.is_authenticated():
+        # if window.api_client.is_authenticated():
         #     # 已登录，直接显示主页面
         #     window.show()
         #     # 加载缓存并显示文件

@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 
 
 class LoginDialog(QDialog):
-    login_success = pyqtSignal(str, bool)  # 添加成功信号，传递账号名和是否是新账号
+    login_success = pyqtSignal(dict)  # 添加成功信号，传递账号名和是否是新账号
 
     """登录对话框"""
     def __init__(self, parent=None):
@@ -145,17 +145,14 @@ class LoginDialog(QDialog):
         point = QPoint(int(self.login_button.width()/2), 0)
 
         # 没获取授权码
-        if not self.account_list.selectedItems() and not re.match(r'^\w{32}$', self.code_input.text()):
-            QToolTip.showText(self.login_button.mapToGlobal(point), '请获取授权码登录或选择账号登录', self)
+        if not re.match(r'^\w{32}$', self.code_input.text()):
+            QToolTip.showText(self.login_button.mapToGlobal(point), '请获取授权码登录', self)
             return
 
         # 没输入账号名称
-        if not self.account_name_input.text() and not self.account_list.selectedItems():
+        if not self.account_name_input.text():
             QToolTip.showText(self.login_button.mapToGlobal(point), '请输入账号名称(唯一标识)', self)
             return
-
-        # self.login_button.setDisabled(True)
-        # self.login_button.setStyleSheet("QPushButton{background-color: #838B8B;}")  # 禁用按钮
 
         # 新账号需要验证, 旧账号需要获取信息
         self.validate_account()
@@ -226,11 +223,8 @@ class LoginDialog(QDialog):
         self.progress_bar.setVisible(False)
         self.account_list.setEnabled(True)
 
-        account_name = result.get('account_name')
-        is_new_account = result.get('is_new', True)
         # 发送登录成功信号
-        self.login_success.emit(account_name, is_new_account)
-        print(f"登录成功，发射信号: {account_name}, {is_new_account}")
+        self.login_success.emit(result)
         self.accept()
 
     # 验证失败
@@ -290,7 +284,7 @@ class ValidationWorker(QThread):
                 return self.finished.emit(result)
 
             # 已存在的账号：检测token并获取信息
-            account_info = self.login_dialog.config['accounts'][self.login_dialog.account_list.selectedItems()[0].text()]
+            account_info = self.login_dialog.config['accounts'][self.login_dialog.file_list.selectedItems()[0].text()]
 
             # 刷新token
             if account_info['expires_at'] <= time.time() + 86400:

@@ -32,8 +32,10 @@ class BaiduPanAPI:
         self.refresh_token: Optional[str] = None
         self.expires_at: Optional[float] = None
 
-        # 加载当前账号
-        self._load_current_account()
+    def lazy_init(self) -> bool:
+        """延迟初始化，只在需要时加载账号"""
+        return self._load_current_account()
+
 
     # 认证管理方法
     def _load_current_account(self) -> bool:
@@ -91,15 +93,18 @@ class BaiduPanAPI:
 
     def is_authenticated(self) -> bool:
         """检查是否已认证"""
-        if not self.access_token or not self.current_account:
-            return self._load_current_account()
+        # 如果还没有尝试加载账号，先尝试加载
+        if not self.current_account:
+            if not self._load_current_account():
+                return False
 
         # 检查令牌是否过期
         if self.expires_at and time.time() > self.expires_at - 300:  # 提前5分钟刷新
             logger.info('访问令牌即将过期，尝试刷新...')
             return self.refresh_access_token()
 
-        return True
+        # 有当前账号且令牌有效
+        return bool(self.current_account and self.access_token)
 
     def get_access_token(self, code: str, account_name: str) -> Dict[str, Any]:
         """使用授权码获取访问令牌"""

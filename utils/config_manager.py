@@ -37,11 +37,6 @@ class ConfigManager:
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 user_config = json.load(f)
 
-            # 合并默认配置
-            for key, value in default_config.items():
-                if key not in user_config:
-                    user_config[key] = value
-
             return user_config
         except (json.JSONDecodeError, IOError) as e:
             logger.error(f"加载配置文件失败，使用默认配置: {e}")
@@ -151,7 +146,6 @@ class ConfigManager:
         self.set('accounts', accounts)
         self.save()
 
-        logger.info(f'已切换到账号: {account_name}')
         return True
 
     def get_current_account(self) -> Optional[str]:

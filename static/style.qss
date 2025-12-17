@@ -197,16 +197,35 @@ QCheckBox::indicator {
     height: 16px;
 }
 
-/* 进度条样式 */
+
+/* 状态栏进度条样式 */
 QProgressBar {
-    border: 1px solid #ccc;
-    border-radius: 3px;
-    background-color: white;
+    border: 1px solid #cccccc;
+    border-radius: 4px;
+    text-align: center;
+    background-color: #f0f0f0;
 }
 
 QProgressBar::chunk {
     background-color: #4CAF50;
-    border-radius: 2px;
+    border-radius: 3px;
+}
+
+/* 状态栏取消按钮 */
+QStatusBar QPushButton {
+    border: 1px solid #dc3545;
+    border-radius: 3px;
+    padding: 2px 8px;
+    background-color: #f8d7da;
+    color: #721c24;
+}
+
+QStatusBar QPushButton:hover {
+    background-color: #f5c6cb;
+}
+
+QStatusBar QPushButton:pressed {
+    background-color: #e4b5bb;
 }
 
 /* 滚动条样式 */
