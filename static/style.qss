@@ -121,7 +121,6 @@ QPushButton#danger:hover {
 
 /* 表格样式 */
 QTableWidget {
-    border: 1px solid #ddd;
     border-radius: 4px;
     background-color: white;
     alternate-background-color: #f9f9f9;
@@ -131,7 +130,6 @@ QTableWidget {
 }
 
 QTableWidget::item {
-    padding: 8px 4px;
     border-bottom: 1px solid #eee;
 }
 
@@ -303,44 +301,54 @@ QLabel#breadcrumbSeparator {
     margin: 0px;
 }
 
-/* 响应式调整 - 小屏幕 */
-@media (max-width: 1200px) {
-    QTableWidget::item {
-        padding: 6px 3px;
-        font-size: 12px;
-    }
-
-    QHeaderView::section {
-        padding: 6px 3px;
-        font-size: 11px;
-    }
-
-    QPushButton {
-        padding: 5px 10px;
-        font-size: 12px;
-        min-height: 28px;
-    }
+/* QMessageBox 按钮样式 */
+QMessageBox QPushButton {
+    min-width: 40px;
+    max-width: 60px;
+    min-height: 15px;
+    max-height: 20px;
+    padding: 3px 6px;
+    font-size: 12px;
 }
 
-/* 对话框按钮 */
-QDialogButtonBox QPushButton {
-    min-width: 80px;
-    min-height: 30px;
-}
+/*/* 响应式调整 - 小屏幕 */*/
+/*@media (max-width: 1200px) {*/
+/*    QTableWidget::item {*/
+/*        padding: 6px 3px;*/
+/*        font-size: 12px;*/
+/*    }*/
 
-/* 卡片样式 */
-QFrame {
-    background-color: white;
-}
+/*    QHeaderView::section {*/
+/*        padding: 6px 3px;*/
+/*        font-size: 11px;*/
+/*    }*/
 
-/* 文本编辑框 */
-QTextEdit {
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    padding: 4px;
-    background-color: white;
-}
+/*    QPushButton {*/
+/*        padding: 5px 10px;*/
+/*        font-size: 12px;*/
+/*        min-height: 28px;*/
+/*    }*/
+/*}*/
 
-QTextEdit:focus {
-    border: 1px solid #2196F3;
-}
+/*/* 对话框按钮 */*/
+/*QDialogButtonBox QPushButton {*/
+/*    min-width: 80px;*/
+/*    min-height: 30px;*/
+/*}*/
+
+/*/* 卡片样式 */*/
+/*QFrame {*/
+/*    background-color: white;*/
+/*}*/
+
+/*/* 文本编辑框 */*/
+/*QTextEdit {*/
+/*    border: 1px solid #ccc;*/
+/*    border-radius: 4px;*/
+/*    padding: 4px;*/
+/*    background-color: white;*/
+/*}*/
+
+/*QTextEdit:focus {*/
+/*    border: 1px solid #2196F3;*/
+/*}*/

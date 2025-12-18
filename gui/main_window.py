@@ -1,20 +1,14 @@
 """
 主窗口 - 修复卡顿和窗口问题
 """
+from typing import Optional
 
 from PyQt5.QtWidgets import *
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer, QDateTime
-from PyQt5.QtGui import QIcon, QFont, QColor
+from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer, QEvent, QPoint, QRect
+from PyQt5.QtGui import QIcon, QKeySequence
 
-# 根据你的实际项目结构取消注释以下导入
-# from gui.styles import AppStyles
 from gui.login_dialog import LoginDialog
-# from gui.scan_dialog import ScanDialog
-# from gui.results_window import ResultsWindow
-# from gui.account_switch_dialog import AccountSwitchDialog
 from core.api_client import BaiduPanAPI
-from core.file_scanner import FileScanner
-from core.models import ScanResult
 from gui.style import AppStyles
 from utils.logger import get_logger
 from utils.config_manager import ConfigManager
@@ -58,6 +52,46 @@ class Worker(QThread):
         self._is_running = False
 
 
+class AutoTooltipTableWidget(QTableWidget):
+    """自动检测文本截断并显示 tooltip 的表格"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setWordWrap(False)
+        self.setTextElideMode(Qt.ElideRight)
+
+    def viewportEvent(self, event):
+        """重写视口事件，只在截断时显示 tooltip"""
+        if event.type() == QEvent.ToolTip:
+            pos = event.pos()
+            item = self.itemAt(pos)
+
+            if item and item.column() == 0:  # 只处理第一列
+                cell_text = item.text()
+                if cell_text:
+                    # 检查文本是否被截断
+                    rect = self.visualItemRect(item)
+                    font_metrics = self.fontMetrics()
+                    text_width = font_metrics.width(cell_text)
+
+                    # 如果文本被截断，显示 tooltip
+                    if text_width > rect.width():
+                        # 显示单元格文本作为 tooltip
+                        QToolTip.showText(event.globalPos(), cell_text, self, rect)
+                        return True
+
+            # 不显示 tooltip
+            QToolTip.hideText()
+            event.ignore()
+            return True
+        elif event.type() == QEvent.Leave:
+            # 鼠标离开时隐藏 tooltip
+            QToolTip.hideText()
+
+        return super().viewportEvent(event)
+
+
 class MainWindow(QMainWindow):
     """主窗口"""
 
@@ -65,6 +99,8 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         # 初始化组件
+        self.original_text = None  # 存储原始文本
+        self.renaming_item = None  # 正在重命名的项
         self.config = ConfigManager()
         self.api_client = None
         self.scanner = None
@@ -165,7 +201,7 @@ class MainWindow(QMainWindow):
 
         """设置UI"""
         self.setWindowTitle('百度网盘工具箱')
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(1000, 800)
 
         # 设置样式
         self.setStyleSheet(AppStyles.get_stylesheet())
@@ -204,7 +240,7 @@ class MainWindow(QMainWindow):
         # 用户信息卡片
         user_card = QFrame()
         user_card.setObjectName('card')
-        user_card.setMinimumHeight(500)
+        user_card.setMinimumHeight(600)
         user_layout = QVBoxLayout(user_card)
 
         self.user_info_label = QLabel()
@@ -221,7 +257,8 @@ class MainWindow(QMainWindow):
         user_layout.addWidget(self.breadcrumb_widget)
 
 
-        self.file_table = QTableWidget()
+        # 文件列表设置
+        self.file_table = AutoTooltipTableWidget()
         self.file_table.setColumnCount(3)  # 3列：文件名、大小、修改时间
         self.file_table.setHorizontalHeaderLabels(['文件名', '大小', '修改时间'])
         self.file_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -231,11 +268,24 @@ class MainWindow(QMainWindow):
         self.file_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.file_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 设置表格的尺寸策略为扩展
         # 设置表格头的行为，例如最后一列拉伸
-        self.file_table.horizontalHeader().setStretchLastSection(True)
         self.file_table.cellDoubleClicked.connect(self.on_table_double_clicked)  # 双击事件
-        user_layout.addWidget(self.file_table, 1)  # 添加拉伸因子，让表格占据更多空间
         header = self.file_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)  # 文件名列拉伸
+        # 第三列固定
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        header.resizeSection(2, 10)
+        # 第一列拉伸
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        self.file_table.setColumnWidth(0, 450)  # 文件名列宽度
+        # 设置右键菜单
+        self.file_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_table.customContextMenuRequested.connect(self.show_file_table_menu)
+        # 监听文件列表项改变
+        self.file_table.itemChanged.connect(self.on_item_changed)
+        # 添加快捷键
+        QShortcut(QKeySequence("F5"), self.file_table).activated.connect(lambda: self.update_items(self.current_path))
+        QShortcut(QKeySequence("F2"), self.file_table).activated.connect(self.rename_file)
+        QShortcut(QKeySequence("Delete"), self.file_table).activated.connect(self.delete_file)
+
 
 
         user_layout.addWidget(self.file_table)
@@ -351,8 +401,8 @@ class MainWindow(QMainWindow):
             for i, (name, full_path) in enumerate(path_parts):
                 # 判断是否是最后一个路径
                 is_last = (i == len(path_parts) - 1)
-
                 if is_last:
+                    self.current_path = full_path
                     # 最后一个路径，使用标签显示，不可点击
                     last_label = QLabel(name)
                     last_label.setObjectName("breadcrumbCurrent")
@@ -370,7 +420,7 @@ class MainWindow(QMainWindow):
                         btn.setObjectName("breadcrumbBtn")
 
                     # 连接点击事件
-                    btn.clicked.connect(lambda checked, p=full_path: self.on_breadcrumb_path_clicked(p))
+                    btn.clicked.connect(lambda checked, p=full_path: self.update_items(p))
                     self.breadcrumb_layout.addWidget(btn)
 
                 # 如果不是最后一个，添加分隔符
@@ -390,8 +440,8 @@ class MainWindow(QMainWindow):
             self.breadcrumb_layout.addWidget(error_label)
             self.breadcrumb_layout.addStretch()
 
-    def on_breadcrumb_path_clicked(self, path):
-        """面包屑路径点击事件"""
+    def update_items(self, path):
+        """更新items"""
         # 如果已经有工作线程在运行，先停止它
         if self.current_worker and self.current_worker.isRunning():
             self.current_worker.stop()
@@ -411,24 +461,188 @@ class MainWindow(QMainWindow):
             func=self.api_client.list_files,
             path=path
         )
-        self.current_worker.finished.connect(self.on_directory_loaded)
+        self.current_worker.finished.connect(self.on_directory_success)
         self.current_worker.error.connect(self.on_directory_load_error)
         self.current_worker.start()
+
+    # 添加菜单处理方法：
+    def show_file_table_menu(self, position):
+        """显示文件表格的右键菜单"""
+        item = self.file_table.itemAt(position)
+        menu = QMenu()
+
+        if item:
+            # 获取文件信息
+            data = item.data(Qt.UserRole)
+
+            # 基础操作
+            menu.addAction("📋 复制文件名", lambda: self.copy_item_text(item.text()))
+
+            if data:
+                menu.addAction("⬇️ 下载", lambda: self.download_file(item, data['path']))  #
+
+                menu.addSeparator()
+                menu.addAction("✏️ 重命名", lambda: self.rename_file(item))
+                menu.addAction("🗑️ 删除", lambda: self.delete_file(data))
+        else:
+            # 空白处点击
+            menu.addAction("🔄 刷新", lambda: self.update_items(self.current_path))
+            menu.addAction("✓ 全选", self.file_table.selectAll)
+
+        menu.exec_(self.file_table.viewport().mapToGlobal(position))
+
+    def copy_item_text(self, text):
+        """复制文本"""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        self.status_label.setText(f"已复制: {text[:30]}...")
+
+    def rename_file(self, item=None):
+        """开始重命名文件"""
+        item = item or self.file_table.currentItem()
+        if item is None:
+            return
+
+        # 记录正在重命名的项目和原始文本
+        self.renaming_item = item
+        self.original_text = item.text()
+
+        # 启用编辑
+        self.file_table.editItem(item)
+
+    def on_item_changed(self, item):
+        """处理单元格内容变化"""
+        # 如果不是重命名操作，直接返回
+        if self.renaming_item != item:
+            return
+
+        # 获取新值
+        new_text = item.text().strip()
+        # 检查是否有变化
+        if new_text == self.original_text:
+            self.renaming_item = self.original_text = None
+            return
+
+        # 是否重名
+        values = list()
+        for i in range(self.file_table.rowCount()):
+            if i == item.row():
+                continue
+            current_item = self.file_table.item(i, 0)
+            if not current_item:
+                continue
+            values.append(current_item.text().strip())
+
+        if new_text.strip() in values:
+            item_obj = self.file_table.item(item.row(), item.column())
+            rect = self.file_table.visualItemRect(item_obj)
+            global_pos = self.file_table.viewport().mapToGlobal(rect.topLeft())
+            QTimer.singleShot(100, lambda: self.show_tooltip(global_pos, f'"{new_text}" 已存在', self.file_table, self.file_table.visualRect(self.file_table.indexFromItem(item))))
+            item.setText(self.original_text)  # 恢复原始文本
+            return
+
+        # 获取文件信息
+        data = item.data(Qt.UserRole)
+        if not data:
+            self.renaming_item = self.original_text = None
+            return
+
+        # 如果已经有工作线程在运行，先停止它
+        if self.current_worker and self.current_worker.isRunning():
+            self.current_worker.stop()
+            self.current_worker.wait()
+        # 创建工作线程来获取目录
+        self.current_worker = Worker(
+            func=self.api_client.batch_operation,
+            operation='rename',
+            filelist=[{"path": data['path'], "newname": new_text}]
+        )
+        self.current_worker.finished.connect(self.on_rename_success)
+        self.current_worker.error.connect(self.on_rename_error)
+        self.current_worker.start()
+
+
+    def on_rename_success(self, result):
+        # 重置状态
+        self.renaming_item = self.original_text = None
+        self.update_items(self.current_path)
+
+        # 重新启用表格
+        self.file_table.setEnabled(True)
+
+        # 显示成功消息
+        self.status_label.setText(f"已成功重命名")
+
+        # 清理工作线程引用
+        self.current_worker = None
+
+    def on_rename_error(self, error_msg):
+
+
+        self.renaming_item = self.original_text = None
+        self.update_items(self.current_path)
+
+        # 使用 status_label 显示错误
+        self.status_label.setText(f"错误: {error_msg}")
+
+        # 也可以显示错误对话框（可选）
+        QMessageBox.critical(self, "错误", f"改名失败：{error_msg}")
+
+        # 清理工作线程引用
+        self.current_worker = None
+
+
+    # 泡泡提示
+    def show_tooltip(self, pos: QPoint, text: str, p_str: Optional[QWidget], rect: QRect):
+        """显示工具提示"""
+        # 显示工具提示
+        QToolTip.showText(pos, text, p_str, rect)
+
+    def delete_file(self, data=None):
+        """删除文件"""
+        data = data or self.file_table.currentItem().data(Qt.UserRole)
+        reply = QMessageBox.question(
+            self, '删除确认',
+            f"确定要删除 {data['path'].split('/')[-1]} 吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            self.api_client.batch_operation('delete', [data['path']])
+            # 删除后刷新
+            self.update_items(self.current_path)
+
+    def download_file(self, item, path):
+        item_obj = self.file_table.item(item.row(), item.column())
+        rect = self.file_table.visualItemRect(item_obj)
+        global_pos = self.file_table.viewport().mapToGlobal(rect.topLeft())
+        QTimer.singleShot(100, lambda: self.show_tooltip(global_pos, "功能暂未实现", self, rect))
 
     # 设置列表项
     def set_list_items(self, files):
         self.file_table.setRowCount(len(files))
         for row, file in enumerate(files):
+            # 文件名单元格
             name_item = QTableWidgetItem(file['server_filename'])
-            name_item.setData(Qt.UserRole, {'path': file['path'], 'is_dir': file['isdir']})  # 隐藏存储路径
+            name_item.setData(Qt.UserRole, {'path': file['path'], 'is_dir': file['isdir']})
+
+            tooltip_text = f"路径: {file['path']}"
+            if not file['isdir']:
+                size = file.get('size', 0)
+                tooltip_text += f"\n大小: {self.format_size(size)}"
+            name_item.setData(Qt.UserRole + 1, tooltip_text)
+
             self.file_table.setItem(row, 0, name_item)
 
+            # 大小单元格
             size = file.get('size', 0)
             size_str = self.format_size(size)
             if file['isdir']:
                 size_str = ""
             self.file_table.setItem(row, 1, QTableWidgetItem(size_str))
 
+            # 修改时间单元格
             mtime = file.get('server_mtime', 0)
             time_str = self.format_time(mtime)
             self.file_table.setItem(row, 2, QTableWidgetItem(time_str))
@@ -449,7 +663,7 @@ class MainWindow(QMainWindow):
         return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
 
     # 双击文件
-    def on_table_double_clicked(self, row, column):
+    def on_table_double_clicked(self, row):
         item = self.file_table.item(row, 0)  # 获取第一列的项目
         data = item.data(Qt.UserRole)  # 获取隐藏的值
 
@@ -477,11 +691,11 @@ class MainWindow(QMainWindow):
             func=self.api_client.list_files,  # 使用线程安全的函数
             path=path
         )
-        self.current_worker.finished.connect(self.on_directory_loaded)
+        self.current_worker.finished.connect(self.on_directory_success)
         self.current_worker.error.connect(self.on_directory_load_error)
         self.current_worker.start()
 
-    def on_directory_loaded(self, result):
+    def on_directory_success(self, result):
         """目录加载完成"""
         # 隐藏状态栏进度条
         self.hide_status_progress()

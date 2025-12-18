@@ -582,7 +582,6 @@ class BaiduPanAPI:
 
         result = self._make_request('POST', '/rest/2.0/xpan/file',
                                   params=params, data=data)
-
         if result and result.get('errno') == 0:
             logger.info(f'批量操作 {operation} 已提交，处理 {len(filelist)} 个文件')
             return {'success': True, 'data': result}
