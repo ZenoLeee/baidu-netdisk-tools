@@ -245,6 +245,64 @@ QScrollBar::handle:vertical:hover {
     background-color: #a8a8a8;
 }
 
+/* 位置标签 */
+QLabel#locationLabel {
+    color: #666;
+    font-size: 12px;
+    padding: 0px 2px 0px 0px;
+    margin: 0px;
+}
+
+/* 面包屑按钮样式 - 紧凑 */
+QPushButton#breadcrumbBtn {
+    background-color: transparent;
+    border: none;
+    color: #0078d7;
+    font-size: 12px;
+    padding: 0px 2px;
+    margin: 0px;
+    min-width: 0px;
+}
+
+QPushButton#breadcrumbBtn:hover {
+    color: #0056a3;
+    text-decoration: underline;
+}
+
+/* 根目录按钮样式 - 紧凑 */
+QPushButton#breadcrumbRoot {
+    background-color: transparent;
+    border: none;
+    color: #0078d7;
+    font-size: 12px;
+    padding: 0px 2px;
+    margin: 0px;
+    min-width: 0px;
+    font-weight: bold;
+}
+
+QPushButton#breadcrumbRoot:hover {
+    color: #0056a3;
+    text-decoration: underline;
+}
+
+/* 当前路径标签样式 - 不可点击 */
+QLabel#breadcrumbCurrent {
+    color: #333;
+    font-size: 12px;
+    padding: 0px 2px;
+    margin: 0px;
+    font-weight: bold;
+}
+
+/* 面包屑分隔符样式 - 紧凑 */
+QLabel#breadcrumbSeparator {
+    color: #999;
+    font-size: 11px;
+    padding: 0px 2px;
+    margin: 0px;
+}
+
 /* 响应式调整 - 小屏幕 */
 @media (max-width: 1200px) {
     QTableWidget::item {

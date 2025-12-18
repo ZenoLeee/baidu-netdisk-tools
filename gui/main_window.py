@@ -211,20 +211,29 @@ class MainWindow(QMainWindow):
         self.user_info_label.setStyleSheet("font-size: 12px;")
         user_layout.addWidget(self.user_info_label)
 
+        # 添加面包屑导航容器
+        self.breadcrumb_widget = QWidget()
+        self.breadcrumb_layout = QHBoxLayout(self.breadcrumb_widget)
+        self.breadcrumb_layout.setContentsMargins(1, 1, 1, 1)
+        self.breadcrumb_layout.setSpacing(1)
+        # 初始面包屑（显示根目录）
+        self.update_breadcrumb("/")
+        user_layout.addWidget(self.breadcrumb_widget)
+
+
         self.file_table = QTableWidget()
         self.file_table.setColumnCount(3)  # 3列：文件名、大小、修改时间
         self.file_table.setHorizontalHeaderLabels(['文件名', '大小', '修改时间'])
         self.file_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.file_table.horizontalHeader().setStretchLastSection(True)
         self.file_table.verticalHeader().setDefaultSectionSize(30)  # 行高
-
+        self.file_table.verticalHeader().setVisible(False)  # 隐藏行号
+        self.file_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.file_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 设置表格的尺寸策略为扩展
-
         # 设置表格头的行为，例如最后一列拉伸
         self.file_table.horizontalHeader().setStretchLastSection(True)
         self.file_table.cellDoubleClicked.connect(self.on_table_double_clicked)  # 双击事件
         user_layout.addWidget(self.file_table, 1)  # 添加拉伸因子，让表格占据更多空间
-
         header = self.file_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)  # 文件名列拉伸
 
@@ -313,6 +322,99 @@ class MainWindow(QMainWindow):
         self.stacked_widget.addWidget(login_page)
         self.login_page = login_page
 
+    def update_breadcrumb(self, path="/"):
+        """更新面包屑导航 - 使用按钮和标签手动拼接"""
+        try:
+            # 清除现有组件
+            while self.breadcrumb_layout.count():
+                item = self.breadcrumb_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+
+            location_label = QLabel("位置:")
+            location_label.setObjectName('locationLabel')
+            self.breadcrumb_layout.addWidget(location_label)
+
+            # 处理路径
+            parts = path.strip('/').split('/')
+
+            # 创建路径列表，包含根目录
+            path_parts = [("根目录", "/")]
+            current_path = ""
+
+            for i, part in enumerate(parts):
+                if part:  # 跳过空的部分
+                    current_path += f"/{part}"
+                    path_parts.append((part, current_path))
+
+            # 添加面包屑按钮和标签
+            for i, (name, full_path) in enumerate(path_parts):
+                # 判断是否是最后一个路径
+                is_last = (i == len(path_parts) - 1)
+
+                if is_last:
+                    # 最后一个路径，使用标签显示，不可点击
+                    last_label = QLabel(name)
+                    last_label.setObjectName("breadcrumbCurrent")
+                    self.breadcrumb_layout.addWidget(last_label)
+                else:
+                    # 非最后一个路径，使用可点击按钮
+                    btn = QPushButton(name)
+                    btn.setFlat(True)
+                    btn.setCursor(Qt.PointingHandCursor)
+
+                    # 设置对象名，便于样式控制
+                    if i == 0:
+                        btn.setObjectName("breadcrumbRoot")
+                    else:
+                        btn.setObjectName("breadcrumbBtn")
+
+                    # 连接点击事件
+                    btn.clicked.connect(lambda checked, p=full_path: self.on_breadcrumb_path_clicked(p))
+                    self.breadcrumb_layout.addWidget(btn)
+
+                # 如果不是最后一个，添加分隔符
+                if i < len(path_parts) - 1:
+                    separator = QLabel(">")
+                    separator.setObjectName("breadcrumbSeparator")
+                    self.breadcrumb_layout.addWidget(separator)
+
+            # 添加弹簧
+            self.breadcrumb_layout.addStretch()
+
+        except Exception as e:
+            logger.error(f"更新面包屑时出错: {e}")
+            # 添加一个简单的标签作为备用
+            error_label = QLabel(f"位置: {path}")
+            error_label.setObjectName("locationLabel")
+            self.breadcrumb_layout.addWidget(error_label)
+            self.breadcrumb_layout.addStretch()
+
+    def on_breadcrumb_path_clicked(self, path):
+        """面包屑路径点击事件"""
+        # 如果已经有工作线程在运行，先停止它
+        if self.current_worker and self.current_worker.isRunning():
+            self.current_worker.stop()
+            self.current_worker.wait()
+
+        # 禁用表格，避免重复点击
+        self.file_table.setEnabled(False)
+
+        # 显示状态栏进度条
+        self.show_status_progress(f"正在加载: {path}")
+
+        # 更新面包屑
+        self.update_breadcrumb(path)
+
+        # 创建工作线程来获取目录
+        self.current_worker = Worker(
+            func=self.api_client.list_files,
+            path=path
+        )
+        self.current_worker.finished.connect(self.on_directory_loaded)
+        self.current_worker.error.connect(self.on_directory_load_error)
+        self.current_worker.start()
+
     # 设置列表项
     def set_list_items(self, files):
         self.file_table.setRowCount(len(files))
@@ -331,7 +433,8 @@ class MainWindow(QMainWindow):
             time_str = self.format_time(mtime)
             self.file_table.setItem(row, 2, QTableWidgetItem(time_str))
 
-    def format_size(self, size):
+    @staticmethod
+    def format_size(size):
         """格式化文件大小"""
         for unit in ['B', 'KB', 'MB', 'GB']:
             if size < 1024.0:
@@ -339,7 +442,8 @@ class MainWindow(QMainWindow):
             size /= 1024.0
         return f"{size:.1f} TB"
 
-    def format_time(self, timestamp):
+    @staticmethod
+    def format_time(timestamp):
         """格式化时间戳"""
         from datetime import datetime
         return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
@@ -348,7 +452,7 @@ class MainWindow(QMainWindow):
     def on_table_double_clicked(self, row, column):
         item = self.file_table.item(row, 0)  # 获取第一列的项目
         data = item.data(Qt.UserRole)  # 获取隐藏的值
-        print(data)
+
         if not data['is_dir']:
             return
 
@@ -363,11 +467,14 @@ class MainWindow(QMainWindow):
         self.file_table.setEnabled(False)
 
         # 显示状态栏进度条
-        self.show_status_progress("正在加载目录...")
+        self.show_status_progress(f"正在加载: {path}")
+
+        # 更新面包屑
+        self.update_breadcrumb(path)
 
         # 创建工作线程来获取目录
         self.current_worker = Worker(
-            func=lambda path: self.api_client.list_files(path),  # 使用线程安全的函数
+            func=self.api_client.list_files,  # 使用线程安全的函数
             path=path
         )
         self.current_worker.finished.connect(self.on_directory_loaded)
@@ -411,9 +518,11 @@ class MainWindow(QMainWindow):
 
 
     # 获取目录内容
-    def get_list_files(self, path: str = '/继续医学教育/临床内科学/国家级'):
-        result = self.api_client.list_files(path)
-        return result
+    def get_list_files(self, path: str = '/'):
+        """获取目录内容（线程安全版本）"""
+        if not self.api_client:
+            return []
+        return self.api_client.list_files(path)
 
     # 登录成功处理
     def on_login_success(self, result):
