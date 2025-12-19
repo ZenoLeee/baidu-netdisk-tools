@@ -487,3 +487,8 @@ QPushButton#minTabButton:checked {
     font-weight: bold;
     border-color: #dee2e6 #dee2e6 white #dee2e6;
 }
+
+/* 传输表格样式 */
+QTableWidget#transTable {
+
+}

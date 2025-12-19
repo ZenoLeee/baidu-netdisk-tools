@@ -1,17 +1,23 @@
 """
 传输任务页面
 """
+import json
 import os
+import time
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QStackedWidget,
     QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QSizePolicy,
-    QMenu, QApplication
+    QMenu, QApplication, QMessageBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QColor
 
 from core.transfer_manager import TransferManager
+from utils.file_utils import FileUtils
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class TransferPage(QWidget):
@@ -23,6 +29,11 @@ class TransferPage(QWidget):
         super().__init__(parent)
         self.parent_window = parent
         self.transfer_manager = TransferManager()
+
+        # 断点续传相关
+        self.resume_data_dir = "resume_data"  # 断点续传数据保存目录
+        self._ensure_resume_dir()
+
         self.setup_ui()
         self.setup_timer()
 
@@ -172,8 +183,20 @@ class TransferPage(QWidget):
 
         for row, task in enumerate(tasks):
             # 任务名称
-            name_item = QTableWidgetItem(task.name)
+            name_text = task.name
+            if hasattr(task, 'total_chunks') and task.total_chunks > 0:
+                # 分片上传任务
+                uploaded_chunks = getattr(task, 'uploaded_chunks', [])
+                if len(uploaded_chunks) > 0:
+                    name_text = f"🔄 {name_text} ({len(uploaded_chunks)}/{task.total_chunks}分片)"
+
+            name_item = QTableWidgetItem(name_text)
             name_item.setData(Qt.UserRole, task.task_id)
+
+            # 如果是可恢复的任务，添加特殊标记
+            if task.status == "已暂停（可断点续传）":
+                name_item.setForeground(QColor("#FF9800"))
+
             table.setItem(row, 0, name_item)
 
             # 类型
@@ -319,39 +342,113 @@ class TransferPage(QWidget):
         clipboard.setText(info)
         self.info_label.setText("已复制任务信息")
 
-    def add_upload_task(self, file_path, remote_path="/"):
-        """添加上传任务（支持大文件分片）"""
+    def add_upload_task(self, file_path, remote_path="/", chunk_size=4 * 1024 * 1024, enable_resume=True):
+        """添加上传任务（支持大文件分片和断点续传）"""
         file_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
+
+        # 检查文件大小
+        if file_size == 0:
+            self.info_label.setText(f"文件为空: {file_name}")
+            return None
 
         task = self.transfer_manager.add_task(
             file_name,
             remote_path,
             file_size,
-            "upload"
+            "upload",
+            local_path=file_path
         )
 
-        # 根据文件大小决定是否分片
-        CHUNK_SIZE = 4 * 1024 * 1024  # 4MB 分片
+        # 设置分片大小
+        task.chunk_size = chunk_size
 
-        if file_size > CHUNK_SIZE:
-            # 大文件，使用分片上传
-            self.start_chunked_upload(task, file_path, CHUNK_SIZE)
+        # 检查是否需要分片
+        if file_size > chunk_size:
+            # 大文件，分片上传
+            task.total_chunks = (file_size + chunk_size - 1) // chunk_size
+            task.status = "等待中"
+
+            # 检查断点续传数据
+            if enable_resume:
+                resume_data = self.transfer_manager._load_resume_data(task.task_id)
+                if resume_data:
+                    task.status = "已暂停（可断点续传）"
+                    task.progress = resume_data.get('progress', 0)
+                    uploaded_chunks = resume_data.get('uploaded_chunks', [])
+
+                    self.info_label.setText(
+                        f"发现断点续传数据: {file_name} "
+                        f"({len(uploaded_chunks)}/{task.total_chunks}分片, {task.progress:.1f}%)"
+                    )
+
+                    # 显示断点续传提示
+                    QMessageBox.information(
+                        self.parent_window,
+                        "断点续传可用",
+                        f"文件 '{file_name}' 有未完成的传输记录\n"
+                        f"已上传 {len(uploaded_chunks)}/{task.total_chunks} 个分片 ({task.progress:.1f}%)\n"
+                        f"点击'继续'按钮可恢复上传"
+                    )
         else:
             # 小文件，直接上传
-            self.start_upload_simulation(task)
+            task.status = "等待中"
+
+        # 开始上传
+        self.start_upload_task(task)
 
         self.info_label.setText(f"已添加上传任务: {file_name}")
         return task
 
-    def start_chunked_upload(self, task, file_path, chunk_size):
-        """分片上传"""
+    def start_upload_task(self, task):
+        """开始上传任务"""
+        if task.status in ["等待中", "已暂停"]:
+            self.transfer_manager.start_upload(task)
+
+    def start_chunked_upload(self, task, file_path, chunk_size, enable_resume=False):
+        """分片上传（支持断点续传）"""
         task.status = "分片上传中"
         task.total_chunks = (task.size + chunk_size - 1) // chunk_size
-        task.current_chunk = 0
+        task.chunk_size = chunk_size
+
+        # 尝试加载断点续传数据
+        if enable_resume:
+            resume_data = self.load_resume_data(task.task_id)
+            if resume_data:
+                task.uploaded_chunks = resume_data.get('uploaded_chunks', [])
+                task.current_chunk = resume_data.get('current_chunk', 0)
+                task.status = "已暂停（可断点续传）"
+                self.info_label.setText(f"发现断点续传数据，可从分片 {task.current_chunk + 1} 继续: {task.name}")
+
+                # 显示断点续传提示
+                QMessageBox.information(
+                    self.parent_window,
+                    "断点续传可用",
+                    f"文件 '{task.name}' 有未完成的传输记录\n"
+                    f"已上传 {len(task.uploaded_chunks)}/{task.total_chunks} 个分片\n"
+                    f"点击'继续'按钮可恢复上传"
+                )
+            else:
+                task.uploaded_chunks = []
+                task.current_chunk = 0
+        else:
+            task.uploaded_chunks = []
+            task.current_chunk = 0
+
+        # 更新表格显示（添加断点续传标记）
+        def update_table():
+            self.task_updated.emit()
+
+        # 使用定时器模拟分片上传过程
+        timer = QTimer()
 
         def upload_chunk():
             if task.current_chunk < task.total_chunks:
+                # 检查是否已上传该分片
+                if task.current_chunk in task.uploaded_chunks:
+                    task.current_chunk += 1
+                    return
+
                 # 模拟上传一个分片
                 chunk_progress = (task.current_chunk + 1) / task.total_chunks * 100
                 task.progress = chunk_progress
@@ -359,20 +456,37 @@ class TransferPage(QWidget):
                 # 模拟上传速度
                 task.speed = 1024 * 1024  # 1MB/s
 
+                # 记录已上传分片
+                task.uploaded_chunks.append(task.current_chunk)
+
+                # 保存断点续传数据
+                if enable_resume:
+                    self.save_resume_data(task)
+
                 # 更新进度
                 task.current_chunk += 1
-                self.task_updated.emit()
+                update_table()
+
+                # 更新信息标签
+                self.info_label.setText(
+                    f"上传中: {task.name} "
+                    f"({task.current_chunk}/{task.total_chunks}分片) "
+                    f"[断点续传已保存]"
+                )
 
                 # 如果是最后一个分片，完成上传
                 if task.current_chunk >= task.total_chunks:
                     task.status = "完成"
                     task.progress = 100
                     task.speed = 0
+
+                    # 清除断点续传数据
+                    if enable_resume:
+                        self.clear_resume_data(task.task_id)
+
                     self.info_label.setText(f"上传完成: {task.name}")
                     timer.stop()
 
-        # 使用定时器模拟分片上传
-        timer = QTimer()
         timer.timeout.connect(upload_chunk)
         timer.start(500)  # 每500ms上传一个分片
 
@@ -398,13 +512,8 @@ class TransferPage(QWidget):
         """开始所有任务 - 只操作当前标签页的任务"""
         tasks = self.transfer_manager.get_tasks(self.current_tab_type)
         for task in tasks:
-            if task.status == "已暂停":
-                self.resume_task(task.task_id)
-            elif task.status == "等待中":
-                if task.type == "upload":
-                    self.start_upload_simulation(task)
-                else:
-                    self.start_download_simulation(task)
+            if task.status in ["等待中", "已暂停"]:
+                self.start_upload_task(task)
 
         self.info_label.setText(f"已开始所有{self.get_tab_name()}任务")
 
@@ -435,7 +544,6 @@ class TransferPage(QWidget):
     # 传输表格右键菜单
     def show_transfer_menu(self, position):
         """显示传输表格右键菜单"""
-        # 确定当前操作的表格
         current_table = self.upload_table if self.current_tab_type == 'upload' else self.download_table
         item = current_table.itemAt(position)
         menu = QMenu()
@@ -445,8 +553,12 @@ class TransferPage(QWidget):
             task = next((t for t in self.transfer_manager.tasks if t.task_id == task_id), None)
 
             if task:
+                # 添加断点续传相关菜单
+                if task.status == "已暂停（可断点续传）":
+                    menu.addAction("🔄 继续上传（断点续传）", lambda: self.resume_task(task_id))
+
                 if task.status in ["上传中", "下载中"]:
-                    menu.addAction("⏸ 暂停", lambda: self.pause_task(task_id))
+                    menu.addAction("⏸ 暂停（保存断点）", lambda: self.pause_task(task_id))
                 elif task.status == "已暂停":
                     menu.addAction("▶ 继续", lambda: self.resume_task(task_id))
 
@@ -455,15 +567,70 @@ class TransferPage(QWidget):
                 else:
                     menu.addAction("🗑️ 删除", lambda: self.delete_task(task_id))
 
+                # 添加断点续传管理
+                if hasattr(task, 'total_chunks') and task.total_chunks > 0:
+                    menu.addSeparator()
+                    uploaded = getattr(task, 'uploaded_chunks', [])
+                    menu.addAction(
+                        f"📊 查看分片进度 ({len(uploaded)}/{task.total_chunks})",
+                        lambda: self.show_chunk_progress(task)
+                    )
+                    if uploaded:
+                        menu.addAction("🗑️ 清除断点数据", lambda: self.clear_resume_data(task.task_id))
+
                 menu.addSeparator()
                 menu.addAction("📋 复制任务信息", lambda: self.copy_task_info(task))
 
         else:
-            # 空白处点击
             menu.addAction("🔄 刷新列表", self.update_transfer_table)
+            menu.addAction("📁 扫描断点续传文件", self.scan_resume_files)
             menu.addAction("🗑️ 清除所有已完成", lambda: self.clear_completed_tasks_for_current_tab())
 
         menu.exec_(current_table.viewport().mapToGlobal(position))
+
+    def show_chunk_progress(self, task):
+        """显示分片上传进度详情"""
+        if hasattr(task, 'total_chunks') and task.total_chunks > 0:
+            uploaded = getattr(task, 'uploaded_chunks', [])
+            QMessageBox.information(
+                self.parent_window,
+                "分片上传详情",
+                f"文件名: {task.name}\n"
+                f"文件大小: {FileUtils.format_size(task.size)}\n"
+                f"分片大小: {FileUtils.format_size(getattr(task, 'chunk_size', 0))}\n"
+                f"总分片数: {task.total_chunks}\n"
+                f"已上传分片: {len(uploaded)}\n"
+                f"当前分片: {getattr(task, 'current_chunk', 0)}\n"
+                f"断点续传: {'已启用' if hasattr(task, 'local_path') else '未启用'}"
+            )
+
+    def scan_resume_files(self):
+        """扫描断点续传文件"""
+        if not os.path.exists(self.resume_data_dir):
+            QMessageBox.information(self.parent_window, "扫描结果", "未找到断点续传数据")
+            return
+
+        resume_files = os.listdir(self.resume_data_dir)
+        if not resume_files:
+            QMessageBox.information(self.parent_window, "扫描结果", "未找到断点续传数据")
+            return
+
+        info = f"找到 {len(resume_files)} 个断点续传文件:\n\n"
+        for file in resume_files[:10]:  # 显示前10个
+            file_path = os.path.join(self.resume_data_dir, file)
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    info += f"• {data.get('name', '未知')} ({data.get('progress', 0):.1f}%)\n"
+            except:
+                info += f"• {file}\n"
+
+        if len(resume_files) > 10:
+            info += f"... 还有 {len(resume_files) - 10} 个文件\n"
+
+        info += f"\n数据目录: {os.path.abspath(self.resume_data_dir)}"
+
+        QMessageBox.information(self.parent_window, "断点续传扫描", info)
 
     def clear_completed_tasks_for_current_tab(self):
         """清除当前标签页所有已完成的任务"""
@@ -539,25 +706,19 @@ class TransferPage(QWidget):
 
     def pause_task(self, task_id):
         """暂停任务"""
-        for task in self.transfer_manager.tasks:
-            if task.task_id == task_id and hasattr(task, '_timer'):
-                task._timer.stop()
-                task.status = "已暂停"
-                task.speed = 0
-                self.info_label.setText(f"已暂停: {task.name}")
-                self.task_updated.emit()
-                break
+        self.transfer_manager.pause_task(task_id)
+        task = self.transfer_manager.get_task(task_id)
+        if task:
+            self.info_label.setText(f"已暂停: {task.name}")
+            self.task_updated.emit()
 
     def resume_task(self, task_id):
         """继续任务"""
-        for task in self.transfer_manager.tasks:
-            if task.task_id == task_id:
-                if task.type == "upload":
-                    self.start_upload_simulation(task)
-                else:
-                    self.start_download_simulation(task)
-                self.info_label.setText(f"已继续: {task.name}")
-                break
+        task = self.transfer_manager.get_task(task_id)
+        if task and task.status in ["已暂停", "已暂停（可断点续传）"]:
+            self.start_upload_task(task)
+            self.info_label.setText(f"已继续: {task.name}")
+            self.task_updated.emit()
 
     def cancel_task(self, task_id):
         """取消任务"""
@@ -577,3 +738,55 @@ class TransferPage(QWidget):
         if task:
             self.info_label.setText(f"已删除: {task.name}")
             self.task_updated.emit()
+
+    def save_resume_data(self, task):
+        """保存断点续传数据"""
+        resume_data = {
+            'task_id': task.task_id,
+            'name': task.name,
+            'local_path': getattr(task, 'local_path', ''),
+            'remote_path': task.remote_path,
+            'size': task.size,
+            'total_chunks': task.total_chunks,
+            'current_chunk': task.current_chunk,
+            'uploaded_chunks': task.uploaded_chunks,
+            'chunk_size': getattr(task, 'chunk_size', 4 * 1024 * 1024),
+            'progress': task.progress,
+            'timestamp': time.time()
+        }
+
+        resume_file = self._get_resume_file_path(task.task_id)
+        try:
+            with open(resume_file, 'w', encoding='utf-8') as f:
+                json.dump(resume_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存断点续传数据失败: {e}")
+
+    def load_resume_data(self, task_id):
+        """加载断点续传数据"""
+        resume_file = self._get_resume_file_path(task_id)
+        if os.path.exists(resume_file):
+            try:
+                with open(resume_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"加载断点续传数据失败: {e}")
+        return None
+
+    def clear_resume_data(self, task_id):
+        """清除断点续传数据"""
+        resume_file = self._get_resume_file_path(task_id)
+        if os.path.exists(resume_file):
+            try:
+                os.remove(resume_file)
+            except Exception as e:
+                logger.error(f"清除断点续传数据失败: {e}")
+
+    def _ensure_resume_dir(self):
+        """确保断点续传数据目录存在"""
+        if not os.path.exists(self.resume_data_dir):
+            os.makedirs(self.resume_data_dir)
+
+    def _get_resume_file_path(self, task_id):
+        """获取断点续传数据文件路径"""
+        return os.path.join(self.resume_data_dir, f"{task_id}.json")

@@ -27,6 +27,7 @@ from core.transfer_manager import TransferManager
 from utils.worker import Worker
 from gui.widgets.table_widgets import DragDropTableWidget
 from gui.transfer_page import TransferPage
+from utils.file_utils import FileUtils
 
 logger = get_logger(__name__)
 
@@ -431,81 +432,18 @@ class MainWindow(QMainWindow):
         self.login_page = login_page
 
     def handle_dropped_files(self, file_paths):
-        """处理拖拽的文件"""
-        if not self.api_client:
-            QMessageBox.warning(self, "提示", "请先登录百度网盘")
+        """处理拖拽的文件 - 支持大文件分片上传和断点续传"""
+        if not self.api_client or not self.api_client.is_authenticated():
+            QMessageBox.warning(self, "提示", "请先登录百度网盘账号")
             return
 
-        if not file_paths:
-            return
-
-        # 显示拖拽提示
-        self.show_drag_drop_indicator(file_paths)
-
-        # 询问用户是否上传
-        reply = QMessageBox.question(
-            self,
-            "上传确认",
-            f"确定要上传 {len(file_paths)} 个文件到当前目录吗？\n\n"
-            f"当前目录：{self.current_path}\n\n"
-            "文件列表：\n" + "\n".join([os.path.basename(f) for f in file_paths[:5]]) +
-            ("\n..." if len(file_paths) > 5 else ""),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-
-        if reply == QMessageBox.Yes:
-            self.upload_multiple_files(file_paths)
-
-    def show_drag_drop_indicator(self, file_paths):
-        """显示拖拽指示器"""
-        # 创建一个半透明的提示窗口
-        indicator = QDialog(self)
-        indicator.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        indicator.setAttribute(Qt.WA_TranslucentBackground)
-        indicator.setStyleSheet("""
-            QDialog {
-                background-color: rgba(33, 150, 243, 150);
-                border-radius: 10px;
-                border: 2px solid #1976D2;
-            }
-            QLabel {
-                color: white;
-                font-size: 14px;
-                font-weight: bold;
-            }
-        """)
-
-        layout = QVBoxLayout(indicator)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        # 显示拖拽信息
-        if len(file_paths) == 1:
-            label = QLabel(f"📎 拖放文件：{os.path.basename(file_paths[0])}")
-        else:
-            label = QLabel(f"📎 拖放 {len(file_paths)} 个文件")
-
-        label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(label)
-
-        # 设置位置（在鼠标位置附近）
-        pos = QCursor.pos()
-        indicator.move(pos.x() - 100, pos.y() - 50)
-        indicator.resize(250, 80)
-        indicator.show()
-
-        # 3秒后自动关闭
-        QTimer.singleShot(3000, indicator.close)
-
-    def upload_multiple_files(self, file_paths):
-        """上传多个文件"""
         total_files = len(file_paths)
         uploaded_count = 0
         failed_files = []
 
         # 显示进度对话框
         progress_dialog = QProgressDialog(
-            f"正在上传文件... (0/{total_files})",
+            f"正在处理文件... (0/{total_files})",
             "取消",
             0,
             total_files,
@@ -515,6 +453,9 @@ class MainWindow(QMainWindow):
         progress_dialog.setWindowModality(Qt.WindowModal)
         progress_dialog.setMinimumDuration(0)
 
+        # 设置分片大小（百度网盘推荐4MB）
+        CHUNK_SIZE = 4 * 1024 * 1024  # 4MB
+
         for i, file_path in enumerate(file_paths):
             if progress_dialog.wasCanceled():
                 break
@@ -522,20 +463,65 @@ class MainWindow(QMainWindow):
             try:
                 # 更新进度
                 progress_dialog.setLabelText(
-                    f"正在上传文件 ({i + 1}/{total_files})\n"
-                    f"{os.path.basename(file_path)}"
+                    f"正在处理文件 ({i + 1}/{total_files})\n"
+                    f"文件名: {os.path.basename(file_path)}"
                 )
                 progress_dialog.setValue(i)
 
-                # 添加上传任务
-                task = self.transfer_page.add_upload_task(file_path, self.current_path)
-                if task:
-                    uploaded_count += 1
+                # 获取文件信息
+                file_size = os.path.getsize(file_path)
+                file_name = os.path.basename(file_path)
+
+                # 检查文件大小
+                if file_size == 0:
+                    QMessageBox.warning(self, "警告", f"文件 '{file_name}' 为空，跳过上传")
+                    continue
+
+                # 检查是否需要分片上传
+                if file_size > CHUNK_SIZE:
+                    # 大文件，需要分片上传并显示断点续传状态
+                    total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+
+                    # 添加上传任务（自动启用分片上传）
+                    task = self.transfer_page.add_upload_task(
+                        file_path,
+                        self.current_path,
+                        chunk_size=CHUNK_SIZE,
+                        enable_resume=True  # 启用断点续传
+                    )
+
+                    if task:
+                        self.status_label.setText(
+                            f"已添加分片上传任务: {file_name} "
+                            f"({self.format_size(file_size)}, {total_chunks}个分片, 支持断点续传)"
+                        )
+                        uploaded_count += 1
+
+                        # 如果文件很大，显示提示
+                        if file_size > 100 * 1024 * 1024:  # 大于100MB
+                            QMessageBox.information(
+                                self,
+                                "大文件上传",
+                                f"文件 '{file_name}' 较大 ({self.format_size(file_size)})\n"
+                                f"已启用分片上传 ({total_chunks}个分片)\n"
+                                f"支持断点续传，可在传输页面查看进度\n"
+                                f"上传过程中请不要关闭程序"
+                            )
+                    else:
+                        failed_files.append(file_path)
                 else:
-                    failed_files.append(file_path)
+                    # 小文件，直接上传
+                    task = self.transfer_page.add_upload_task(
+                        file_path,
+                        self.current_path
+                    )
+                    if task:
+                        uploaded_count += 1
+                    else:
+                        failed_files.append(file_path)
 
             except Exception as e:
-                logger.error(f"上传文件失败 {file_path}: {e}")
+                logger.error(f"处理文件失败 {file_path}: {e}")
                 failed_files.append(file_path)
 
             # 处理事件，保持界面响应
@@ -548,16 +534,21 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "上传结果",
-                f"成功上传 {uploaded_count}/{total_files} 个文件\n\n"
+                f"成功添加 {uploaded_count}/{total_files} 个上传任务\n\n"
                 f"失败的文件：\n" + "\n".join([os.path.basename(f) for f in failed_files[:10]]) +
-                ("\n..." if len(failed_files) > 10 else "")
+                ("\n..." if len(failed_files) > 10 else "") + "\n\n"
+                                                              f"分片上传任务可在传输页面查看和管理"
             )
         else:
             QMessageBox.information(
                 self,
-                "上传完成",
-                f"成功上传 {uploaded_count} 个文件"
+                "上传任务已添加",
+                f"成功添加 {uploaded_count} 个上传任务\n"
+                f"分片上传任务支持断点续传，请到传输页面查看进度"
             )
+
+        # 切换到传输页面
+        self.switch_to_transfer_page()
 
         # 刷新文件列表
         self.update_items(self.current_path)
@@ -893,33 +884,18 @@ class MainWindow(QMainWindow):
             tooltip_text = f"路径: {file['path']}"
             if not file['isdir']:
                 size = file.get('size', 0)
-                tooltip_text += f"\n大小: {self.format_size(size)}"
+                tooltip_text += f"\n大小: {FileUtils.format_size(size)}"
             name_item.setData(Qt.UserRole + 1, tooltip_text)
 
             self.file_table.setItem(row, 0, name_item)
 
             size = file.get('size', 0)
-            size_str = self.format_size(size) if not file['isdir'] else ""
+            size_str = FileUtils.format_size(size) if not file['isdir'] else ""
             self.file_table.setItem(row, 1, QTableWidgetItem(size_str))
 
             mtime = file.get('server_mtime', 0)
-            time_str = self.format_time(mtime)
+            time_str = FileUtils.format_time(mtime)
             self.file_table.setItem(row, 2, QTableWidgetItem(time_str))
-
-    @staticmethod
-    def format_size(size):
-        """格式化文件大小"""
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if size < 1024.0:
-                return f"{size:.1f} {unit}"
-            size /= 1024.0
-        return f"{size:.1f} TB"
-
-    @staticmethod
-    def format_time(timestamp):
-        """格式化时间戳"""
-        from datetime import datetime
-        return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
 
     def on_table_double_clicked(self, row):
         item = self.file_table.item(row, 0)
