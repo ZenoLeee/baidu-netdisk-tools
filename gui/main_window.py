@@ -2,21 +2,19 @@
 主窗口 - 集成文件管理和传输页面
 """
 import os
-import time
 from typing import Optional
-from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QMainWindow, QApplication, QWidget, QVBoxLayout, QStackedWidget,
     QHBoxLayout, QLabel, QPushButton, QAbstractItemView, QSizePolicy,
     QHeaderView, QShortcut, QFrame, QMenu, QMessageBox, QTableWidgetItem,
     QToolTip, QDialog, QStatusBar, QProgressBar, QAction, QFileDialog,
-    QTableWidget, QInputDialog, QLineEdit
+    QInputDialog, QLineEdit, QProgressDialog
 )
 from PyQt5.QtCore import (
-    Qt, pyqtSignal, QThread, QTimer, QEvent, QPoint, QRect
+    Qt, QTimer, QPoint, QRect
 )
-from PyQt5.QtGui import QIcon, QKeySequence, QColor
+from PyQt5.QtGui import QIcon, QKeySequence, QCursor
 
 from gui.login_dialog import LoginDialog
 from core.api_client import BaiduPanAPI
@@ -24,578 +22,13 @@ from gui.style import AppStyles
 from utils.logger import get_logger
 from utils.config_manager import ConfigManager
 
+# 从新模块导入
+from core.transfer_manager import TransferManager
+from utils.worker import Worker
+from gui.widgets.table_widgets import DragDropTableWidget
+from gui.transfer_page import TransferPage
+
 logger = get_logger(__name__)
-
-
-class TransferTask:
-    """传输任务类"""
-
-    def __init__(self, task_id, name, path, size, task_type, status="等待中", progress=0):
-        self.task_id = task_id
-        self.name = name
-        self.path = path
-        self.size = size
-        self.type = task_type  # "upload" 或 "download"
-        self.status = status
-        self.progress = progress
-        self.speed = 0
-        self.start_time = time.time()
-        self.created_time = datetime.now()
-
-    def to_dict(self):
-        """转换为字典"""
-        return {
-            'id': self.task_id,
-            'name': self.name,
-            'path': self.path,
-            'size': self.size,
-            'type': self.type,
-            'status': self.status,
-            'progress': self.progress,
-            'speed': self.speed,
-            'created_time': self.created_time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-
-
-class TransferManager:
-    """传输管理器"""
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance.tasks = []
-            cls._instance.task_counter = 0
-        return cls._instance
-
-    def add_task(self, name, path, size, task_type):
-        """添加新任务"""
-        self.task_counter += 1
-        task = TransferTask(self.task_counter, name, path, size, task_type)
-        self.tasks.append(task)
-        return task
-
-    def get_tasks(self, task_type=None):
-        """获取任务列表"""
-        if task_type:
-            return [task for task in self.tasks if task.type == task_type]
-        return self.tasks
-
-    def update_task_progress(self, task_id, progress, speed=0, status=None):
-        """更新任务进度"""
-        for task in self.tasks:
-            if task.task_id == task_id:
-                task.progress = progress
-                task.speed = speed
-                if status:
-                    task.status = status
-                return True
-        return False
-
-    def remove_task(self, task_id):
-        """移除任务"""
-        for i, task in enumerate(self.tasks):
-            if task.task_id == task_id:
-                return self.tasks.pop(i)
-        return None
-
-    def clear_completed_tasks(self):
-        """清理已完成的任务"""
-        self.tasks = [task for task in self.tasks if task.status not in ["完成", "失败", "已取消"]]
-
-
-class Worker(QThread):
-    """通用工作线程类"""
-    finished = pyqtSignal(object)  # 完成任务时发射，传递结果
-    error = pyqtSignal(str)  # 发生错误时发射
-    progress = pyqtSignal(int, str)
-
-    def __init__(self, func, *args, **kwargs):
-        """
-        初始化工作线程
-
-        Args:
-            func: 要执行的函数
-            *args: 函数的位置参数
-            **kwargs: 函数的关键字参数
-        """
-        super().__init__()
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs
-        self._is_running = True
-
-    def run(self):
-        """执行任务"""
-        try:
-            result = self.func(*self.args, **self.kwargs)
-            if self._is_running:
-                self.finished.emit(result)
-        except Exception as e:
-            if self._is_running:
-                self.error.emit(str(e))
-
-    def stop(self):
-        """停止任务"""
-        self._is_running = False
-
-
-class AutoTooltipTableWidget(QTableWidget):
-    """自动检测文本截断并显示 tooltip 的表格"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMouseTracking(True)
-        self.setWordWrap(False)
-        self.setTextElideMode(Qt.ElideRight)
-
-    def viewportEvent(self, event):
-        """重写视口事件，只在截断时显示 tooltip"""
-        if event.type() == QEvent.ToolTip:
-            pos = event.pos()
-            item = self.itemAt(pos)
-
-            if item and item.column() == 0:  # 只处理第一列
-                cell_text = item.text()
-                if cell_text:
-                    # 检查文本是否被截断
-                    rect = self.visualItemRect(item)
-                    font_metrics = self.fontMetrics()
-                    text_width = font_metrics.width(cell_text)
-
-                    # 如果文本被截断，显示 tooltip
-                    if text_width > rect.width():
-                        # 显示单元格文本作为 tooltip
-                        QToolTip.showText(event.globalPos(), cell_text, self, rect)
-                        return True
-
-            # 不显示 tooltip
-            QToolTip.hideText()
-            event.ignore()
-            return True
-        elif event.type() == QEvent.Leave:
-            # 鼠标离开时隐藏 tooltip
-            QToolTip.hideText()
-
-        return super().viewportEvent(event)
-
-
-class TransferPage(QWidget):
-    """传输页面"""
-
-    task_updated = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.parent_window = parent
-        self.transfer_manager = TransferManager()
-        self.setup_ui()
-        self.setup_timer()
-
-    def setup_ui(self):
-        """设置UI"""
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(15)
-
-        # 控制按钮区域
-        control_widget = QWidget()
-        control_layout = QHBoxLayout(control_widget)
-        control_layout.setContentsMargins(0, 0, 0, 0)
-
-        # 全部开始按钮
-        self.start_all_btn = QPushButton("▶ 全部开始")
-        self.start_all_btn.setObjectName("authbut")
-        self.start_all_btn.setMaximumWidth(100)
-        self.start_all_btn.clicked.connect(self.start_all_tasks)
-        control_layout.addWidget(self.start_all_btn)
-
-        # 全部暂停按钮
-        self.pause_all_btn = QPushButton("⏸ 全部暂停")
-        self.pause_all_btn.setObjectName("warning")
-        self.pause_all_btn.setMaximumWidth(100)
-        self.pause_all_btn.clicked.connect(self.pause_all_tasks)
-        control_layout.addWidget(self.pause_all_btn)
-
-        # 清除已完成按钮
-        self.clear_completed_btn = QPushButton("🗑️ 清除已完成")
-        self.clear_completed_btn.setObjectName("danger")
-        self.clear_completed_btn.setMaximumWidth(120)
-        self.clear_completed_btn.clicked.connect(self.clear_completed_tasks)
-        control_layout.addWidget(self.clear_completed_btn)
-
-        control_layout.addStretch()
-        main_layout.addWidget(control_widget)
-
-        # 任务统计信息
-        stats_widget = QWidget()
-        stats_layout = QHBoxLayout(stats_widget)
-        stats_layout.setContentsMargins(10, 5, 10, 5)
-
-        self.total_label = QLabel("总任务: 0")
-        self.uploading_label = QLabel("上传中: 0")
-        self.downloading_label = QLabel("下载中: 0")
-        self.completed_label = QLabel("已完成: 0")
-
-        for label in [self.total_label, self.uploading_label,
-                      self.downloading_label, self.completed_label]:
-            label.setObjectName("user")
-            stats_layout.addWidget(label)
-
-        stats_layout.addStretch()
-        main_layout.addWidget(stats_widget)
-
-        # 传输任务表格
-        self.transfer_table = QTableWidget()
-        self.transfer_table.setColumnCount(6)
-        self.transfer_table.setHorizontalHeaderLabels([
-            '任务名称', '类型', '进度', '速度', '状态', '操作'
-        ])
-        self.transfer_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.transfer_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.transfer_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-        # 设置列宽
-        header = self.transfer_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)  # 任务名称列自适应
-        header.resizeSection(1, 80)  # 类型列
-        header.resizeSection(2, 150)  # 进度列
-        header.resizeSection(3, 100)  # 速度列
-        header.resizeSection(4, 100)  # 状态列
-        header.resizeSection(5, 120)  # 操作列
-
-        # 设置右键菜单
-        self.transfer_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.transfer_table.customContextMenuRequested.connect(self.show_transfer_menu)
-
-        main_layout.addWidget(self.transfer_table)
-
-        # 底部信息
-        bottom_widget = QWidget()
-        bottom_layout = QHBoxLayout(bottom_widget)
-
-        self.info_label = QLabel("就绪")
-        self.info_label.setObjectName("subtitle")
-        bottom_layout.addWidget(self.info_label)
-
-        bottom_layout.addStretch()
-        main_layout.addWidget(bottom_widget)
-
-    def setup_timer(self):
-        """设置定时器更新任务状态"""
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self.update_transfer_table)
-        self.update_timer.start(1000)  # 每秒更新一次
-
-    def update_transfer_table(self):
-        """更新传输表格"""
-        tasks = self.transfer_manager.get_tasks()
-        self.transfer_table.setRowCount(len(tasks))
-
-        # 统计信息
-        total = len(tasks)
-        uploading = len([t for t in tasks if t.status == "上传中"])
-        downloading = len([t for t in tasks if t.status == "下载中"])
-        completed = len([t for t in tasks if t.status == "完成"])
-
-        self.total_label.setText(f"总任务: {total}")
-        self.uploading_label.setText(f"上传中: {uploading}")
-        self.downloading_label.setText(f"下载中: {downloading}")
-        self.completed_label.setText(f"已完成: {completed}")
-
-        for row, task in enumerate(tasks):
-            # 任务名称
-            name_item = QTableWidgetItem(task.name)
-            name_item.setData(Qt.UserRole, task.task_id)
-            self.transfer_table.setItem(row, 0, name_item)
-
-            # 类型
-            type_icon = "⬆️" if task.type == "upload" else "⬇️"
-            type_text = "上传" if task.type == "upload" else "下载"
-            type_item = QTableWidgetItem(f"{type_icon} {type_text}")
-            self.transfer_table.setItem(row, 1, type_item)
-
-            # 进度
-            progress_item = QTableWidgetItem(f"{task.progress}%")
-            self.transfer_table.setItem(row, 2, progress_item)
-
-            # 速度
-            if task.speed > 0:
-                speed_text = self.format_speed(task.speed)
-            else:
-                speed_text = "等待中"
-            speed_item = QTableWidgetItem(speed_text)
-            self.transfer_table.setItem(row, 3, speed_item)
-
-            # 状态
-            status_item = QTableWidgetItem(task.status)
-            # 根据状态设置颜色
-            if task.status == "完成":
-                status_item.setForeground(QColor("#4CAF50"))
-            elif task.status == "失败":
-                status_item.setForeground(QColor("#F44336"))
-            elif task.status in ["上传中", "下载中"]:
-                status_item.setForeground(QColor("#2196F3"))
-            elif task.status == "已暂停":
-                status_item.setForeground(QColor("#FF9800"))
-            self.transfer_table.setItem(row, 4, status_item)
-
-            # 操作按钮
-            button_widget = QWidget()
-            button_layout = QHBoxLayout(button_widget)
-            button_layout.setContentsMargins(5, 2, 5, 2)
-            button_layout.setSpacing(5)
-
-            # 暂停/继续按钮
-            if task.status in ["上传中", "下载中"]:
-                pause_btn = QPushButton("⏸")
-                pause_btn.setToolTip("暂停")
-                pause_btn.setMaximumWidth(30)
-                pause_btn.clicked.connect(lambda checked, tid=task.task_id: self.pause_task(tid))
-                button_layout.addWidget(pause_btn)
-            elif task.status == "已暂停":
-                resume_btn = QPushButton("▶")
-                resume_btn.setToolTip("继续")
-                resume_btn.setMaximumWidth(30)
-                resume_btn.clicked.connect(lambda checked, tid=task.task_id: self.resume_task(tid))
-                button_layout.addWidget(resume_btn)
-            else:
-                # 对于已完成或失败的任务，不显示暂停/继续按钮
-                button_layout.addWidget(QLabel(""))
-
-            # 取消按钮
-            if task.status not in ["完成", "失败"]:
-                cancel_btn = QPushButton("✕")
-                cancel_btn.setToolTip("取消")
-                cancel_btn.setMaximumWidth(30)
-                cancel_btn.setObjectName("danger")
-                cancel_btn.clicked.connect(lambda checked, tid=task.task_id: self.cancel_task(tid))
-                button_layout.addWidget(cancel_btn)
-            else:
-                # 删除按钮（已完成或失败的任务）
-                delete_btn = QPushButton("🗑️")
-                delete_btn.setToolTip("删除")
-                delete_btn.setMaximumWidth(30)
-                delete_btn.clicked.connect(lambda checked, tid=task.task_id: self.delete_task(tid))
-                button_layout.addWidget(delete_btn)
-
-            self.transfer_table.setCellWidget(row, 5, button_widget)
-
-    @staticmethod
-    def format_speed(speed):
-        """格式化速度显示"""
-        if speed < 1024:
-            return f"{speed:.1f} B/s"
-        elif speed < 1024 * 1024:
-            return f"{speed / 1024:.1f} KB/s"
-        else:
-            return f"{speed / (1024 * 1024):.1f} MB/s"
-
-    def show_transfer_menu(self, position):
-        """显示传输表格右键菜单"""
-        item = self.transfer_table.itemAt(position)
-        menu = QMenu()
-
-        if item:
-            task_id = item.data(Qt.UserRole)
-            task = next((t for t in self.transfer_manager.tasks if t.task_id == task_id), None)
-
-            if task:
-                if task.status in ["上传中", "下载中"]:
-                    menu.addAction("⏸ 暂停", lambda: self.pause_task(task_id))
-                elif task.status == "已暂停":
-                    menu.addAction("▶ 继续", lambda: self.resume_task(task_id))
-
-                if task.status not in ["完成", "失败"]:
-                    menu.addAction("✕ 取消", lambda: self.cancel_task(task_id))
-                else:
-                    menu.addAction("🗑️ 删除", lambda: self.delete_task(task_id))
-
-                menu.addSeparator()
-                menu.addAction("📋 复制任务信息", lambda: self.copy_task_info(task))
-
-        else:
-            # 空白处点击
-            menu.addAction("🔄 刷新列表", self.update_transfer_table)
-            menu.addAction("🗑️ 清除所有已完成", self.clear_completed_tasks)
-
-        menu.exec_(self.transfer_table.viewport().mapToGlobal(position))
-
-    def copy_task_info(self, task):
-        """复制任务信息到剪贴板"""
-        clipboard = QApplication.clipboard()
-        info = f"任务: {task.name}\n类型: {task.type}\n状态: {task.status}\n进度: {task.progress}%"
-        clipboard.setText(info)
-        self.info_label.setText("已复制任务信息")
-
-    def add_upload_task(self, file_path, remote_path="/"):
-        """添加上传任务"""
-        file_name = os.path.basename(file_path)
-        file_size = os.path.getsize(file_path)
-
-        task = self.transfer_manager.add_task(
-            file_name,
-            remote_path,
-            file_size,
-            "upload"
-        )
-
-        # 模拟上传过程
-        self.start_upload_simulation(task)
-
-        self.info_label.setText(f"已添加上传任务: {file_name}")
-        return task
-
-    def add_download_task(self, file_name, remote_path, file_size):
-        """添加下载任务"""
-        task = self.transfer_manager.add_task(
-            file_name,
-            remote_path,
-            file_size,
-            "download"
-        )
-
-        # 模拟下载过程
-        self.start_download_simulation(task)
-
-        self.info_label.setText(f"已添加下载任务: {file_name}")
-        return task
-
-    def start_upload_simulation(self, task):
-        """模拟上传过程"""
-        task.status = "上传中"
-
-        def update_progress():
-            if task.progress < 100:
-                # 模拟进度增加
-                task.progress += 2
-                task.speed = 500 * 1024  # 模拟500KB/s的速度
-
-                # 随机模拟一些错误
-                if task.progress > 80 and task.task_id % 5 == 0:
-                    task.status = "失败"
-                    task.speed = 0
-                    self.info_label.setText(f"上传失败: {task.name}")
-                    return
-
-                if task.progress >= 100:
-                    task.progress = 100
-                    task.status = "完成"
-                    task.speed = 0
-                    self.info_label.setText(f"上传完成: {task.name}")
-
-                # 发射更新信号
-                self.task_updated.emit()
-
-        # 使用定时器模拟上传过程
-        timer = QTimer()
-        timer.timeout.connect(update_progress)
-        timer.start(200)  # 每200ms更新一次
-
-        # 保存定时器引用
-        task._timer = timer
-
-    def start_download_simulation(self, task):
-        """模拟下载过程"""
-        task.status = "下载中"
-
-        def update_progress():
-            if task.progress < 100:
-                # 模拟进度增加
-                task.progress += 3
-                task.speed = 800 * 1024  # 模拟800KB/s的速度
-
-                # 随机模拟一些错误
-                if task.progress > 70 and task.task_id % 7 == 0:
-                    task.status = "失败"
-                    task.speed = 0
-                    self.info_label.setText(f"下载失败: {task.name}")
-                    return
-
-                if task.progress >= 100:
-                    task.progress = 100
-                    task.status = "完成"
-                    task.speed = 0
-                    self.info_label.setText(f"下载完成: {task.name}")
-
-                # 发射更新信号
-                self.task_updated.emit()
-
-        # 使用定时器模拟下载过程
-        timer = QTimer()
-        timer.timeout.connect(update_progress)
-        timer.start(150)  # 每150ms更新一次
-
-        # 保存定时器引用
-        task._timer = timer
-
-    def pause_task(self, task_id):
-        """暂停任务"""
-        for task in self.transfer_manager.tasks:
-            if task.task_id == task_id and hasattr(task, '_timer'):
-                task._timer.stop()
-                task.status = "已暂停"
-                task.speed = 0
-                self.info_label.setText(f"已暂停: {task.name}")
-                self.task_updated.emit()
-                break
-
-    def resume_task(self, task_id):
-        """继续任务"""
-        for task in self.transfer_manager.tasks:
-            if task.task_id == task_id:
-                if task.type == "upload":
-                    self.start_upload_simulation(task)
-                else:
-                    self.start_download_simulation(task)
-                self.info_label.setText(f"已继续: {task.name}")
-                break
-
-    def cancel_task(self, task_id):
-        """取消任务"""
-        for task in self.transfer_manager.tasks:
-            if task.task_id == task_id:
-                if hasattr(task, '_timer'):
-                    task._timer.stop()
-                task.status = "已取消"
-                task.speed = 0
-                self.info_label.setText(f"已取消: {task.name}")
-                self.task_updated.emit()
-                break
-
-    def delete_task(self, task_id):
-        """删除任务"""
-        task = self.transfer_manager.remove_task(task_id)
-        if task:
-            self.info_label.setText(f"已删除: {task.name}")
-            self.task_updated.emit()
-
-    def start_all_tasks(self):
-        """开始所有任务"""
-        for task in self.transfer_manager.tasks:
-            if task.status == "已暂停":
-                self.resume_task(task.task_id)
-            elif task.status == "等待中":
-                if task.type == "upload":
-                    self.start_upload_simulation(task)
-                else:
-                    self.start_download_simulation(task)
-
-        self.info_label.setText("已开始所有任务")
-
-    def pause_all_tasks(self):
-        """暂停所有任务"""
-        for task in self.transfer_manager.tasks:
-            if task.status in ["上传中", "下载中"]:
-                self.pause_task(task.task_id)
-
-        self.info_label.setText("已暂停所有任务")
-
-    def clear_completed_tasks(self):
-        """清除已完成的任务"""
-        self.transfer_manager.clear_completed_tasks()
-        self.info_label.setText("已清除所有已完成任务")
-        self.task_updated.emit()
 
 
 class MainWindow(QMainWindow):
@@ -888,7 +321,7 @@ class MainWindow(QMainWindow):
         user_layout.addWidget(self.breadcrumb_widget)
 
         # 文件列表设置
-        self.file_table = AutoTooltipTableWidget()
+        self.file_table = DragDropTableWidget()  # 修改这里
         self.file_table.setColumnCount(3)  # 3列：文件名、大小、修改时间
         self.file_table.setHorizontalHeaderLabels(['文件名', '大小', '修改时间'])
         self.file_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -897,6 +330,9 @@ class MainWindow(QMainWindow):
         self.file_table.verticalHeader().setVisible(False)  # 隐藏行号
         self.file_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.file_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        # 连接拖拽信号
+        self.file_table.files_dropped.connect(self.handle_dropped_files)
 
         # 设置表格头的行为
         self.file_table.cellDoubleClicked.connect(self.on_table_double_clicked)
@@ -993,6 +429,138 @@ class MainWindow(QMainWindow):
 
         self.stacked_widget.addWidget(login_page)
         self.login_page = login_page
+
+    def handle_dropped_files(self, file_paths):
+        """处理拖拽的文件"""
+        if not self.api_client:
+            QMessageBox.warning(self, "提示", "请先登录百度网盘")
+            return
+
+        if not file_paths:
+            return
+
+        # 显示拖拽提示
+        self.show_drag_drop_indicator(file_paths)
+
+        # 询问用户是否上传
+        reply = QMessageBox.question(
+            self,
+            "上传确认",
+            f"确定要上传 {len(file_paths)} 个文件到当前目录吗？\n\n"
+            f"当前目录：{self.current_path}\n\n"
+            "文件列表：\n" + "\n".join([os.path.basename(f) for f in file_paths[:5]]) +
+            ("\n..." if len(file_paths) > 5 else ""),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+
+        if reply == QMessageBox.Yes:
+            self.upload_multiple_files(file_paths)
+
+    def show_drag_drop_indicator(self, file_paths):
+        """显示拖拽指示器"""
+        # 创建一个半透明的提示窗口
+        indicator = QDialog(self)
+        indicator.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        indicator.setAttribute(Qt.WA_TranslucentBackground)
+        indicator.setStyleSheet("""
+            QDialog {
+                background-color: rgba(33, 150, 243, 150);
+                border-radius: 10px;
+                border: 2px solid #1976D2;
+            }
+            QLabel {
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+            }
+        """)
+
+        layout = QVBoxLayout(indicator)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # 显示拖拽信息
+        if len(file_paths) == 1:
+            label = QLabel(f"📎 拖放文件：{os.path.basename(file_paths[0])}")
+        else:
+            label = QLabel(f"📎 拖放 {len(file_paths)} 个文件")
+
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+
+        # 设置位置（在鼠标位置附近）
+        pos = QCursor.pos()
+        indicator.move(pos.x() - 100, pos.y() - 50)
+        indicator.resize(250, 80)
+        indicator.show()
+
+        # 3秒后自动关闭
+        QTimer.singleShot(3000, indicator.close)
+
+    def upload_multiple_files(self, file_paths):
+        """上传多个文件"""
+        total_files = len(file_paths)
+        uploaded_count = 0
+        failed_files = []
+
+        # 显示进度对话框
+        progress_dialog = QProgressDialog(
+            f"正在上传文件... (0/{total_files})",
+            "取消",
+            0,
+            total_files,
+            self
+        )
+        progress_dialog.setWindowTitle("上传进度")
+        progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setMinimumDuration(0)
+
+        for i, file_path in enumerate(file_paths):
+            if progress_dialog.wasCanceled():
+                break
+
+            try:
+                # 更新进度
+                progress_dialog.setLabelText(
+                    f"正在上传文件 ({i + 1}/{total_files})\n"
+                    f"{os.path.basename(file_path)}"
+                )
+                progress_dialog.setValue(i)
+
+                # 添加上传任务
+                task = self.transfer_page.add_upload_task(file_path, self.current_path)
+                if task:
+                    uploaded_count += 1
+                else:
+                    failed_files.append(file_path)
+
+            except Exception as e:
+                logger.error(f"上传文件失败 {file_path}: {e}")
+                failed_files.append(file_path)
+
+            # 处理事件，保持界面响应
+            QApplication.processEvents()
+
+        progress_dialog.setValue(total_files)
+
+        # 显示结果
+        if failed_files:
+            QMessageBox.warning(
+                self,
+                "上传结果",
+                f"成功上传 {uploaded_count}/{total_files} 个文件\n\n"
+                f"失败的文件：\n" + "\n".join([os.path.basename(f) for f in failed_files[:10]]) +
+                ("\n..." if len(failed_files) > 10 else "")
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "上传完成",
+                f"成功上传 {uploaded_count} 个文件"
+            )
+
+        # 刷新文件列表
+        self.update_items(self.current_path)
 
     # 上传文件
     def upload_file(self):

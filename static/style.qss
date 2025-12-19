@@ -464,3 +464,26 @@ QPushButton#tabButton:checked {
     font-weight: bold;
     border-color: #dee2e6 #dee2e6 white #dee2e6;
 }
+
+
+/* 上传下载标签按钮 */
+QPushButton#minTabButton {
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-bottom: none;
+    font-size: 10px;
+    color: #495057;
+    margin: 4px 1px 0 1px;
+}
+
+QPushButton#minTabButton:hover {
+    background-color: #e9ecef;
+    color: #696969;
+}
+
+QPushButton#minTabButton:checked {
+    background-color: white;
+    color: #007bff;
+    font-weight: bold;
+    border-color: #dee2e6 #dee2e6 white #dee2e6;
+}
