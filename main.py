@@ -9,10 +9,9 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt
 
 from gui.main_window import MainWindow
-from gui.login_dialog import LoginDialog
 from utils.logger import get_logger
 
 logger = get_logger(__name__)

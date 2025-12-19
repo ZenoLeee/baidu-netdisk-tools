@@ -759,8 +759,6 @@ class MainWindow(QMainWindow):
         self.file_manage_btn.setCheckable(True)
         self.file_manage_btn.setChecked(True)
         self.file_manage_btn.clicked.connect(self.switch_to_file_manage_page)
-        # self.file_manage_btn.setMinimumWidth(70)
-        # self.file_manage_btn.setMinimumHeight(20)
         self.file_manage_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         tab_layout.addWidget(self.file_manage_btn)
 
@@ -769,8 +767,6 @@ class MainWindow(QMainWindow):
         self.transfer_btn.setObjectName('tabButton')
         self.transfer_btn.setCheckable(True)
         self.transfer_btn.clicked.connect(self.switch_to_transfer_page)
-        # self.transfer_btn.setMinimumWidth(80)
-        # self.transfer_btn.setMinimumHeight(25)
         self.transfer_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         tab_layout.addWidget(self.transfer_btn)
 
@@ -1319,11 +1315,12 @@ class MainWindow(QMainWindow):
         global_pos = self.file_table.viewport().mapToGlobal(rect.topLeft())
         QTimer.singleShot(100, lambda: self.show_tooltip(global_pos, f"已添加下载任务: {item.text()}", self, rect))
 
+    # 设置表格项目
     def set_list_items(self, files):
         self.file_table.setRowCount(len(files))
         for row, file in enumerate(files):
             name_item = QTableWidgetItem(file['server_filename'])
-            name_item.setData(Qt.UserRole, {'path': file['path'], 'is_dir': file['isdir']})
+            name_item.setData(Qt.UserRole, {'path': file['path'], 'is_dir': file['isdir'], 'fs_id': file['fs_id']})
 
             tooltip_text = f"路径: {file['path']}"
             if not file['isdir']:

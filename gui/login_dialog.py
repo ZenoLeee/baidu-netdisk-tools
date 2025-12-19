@@ -4,14 +4,12 @@ import re
 import time
 
 from PyQt5.QtCore import pyqtSignal, Qt, QThread, QUrl, QPoint
-from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
 from PyQt5.QtWidgets import *
 
 from core.api_client import BaiduPanAPI
 from gui.style import AppStyles
 from utils.logger import get_logger
-import webbrowser
 
 logger = get_logger(__name__)
 

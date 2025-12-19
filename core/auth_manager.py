@@ -4,7 +4,6 @@
 import json
 import time
 from typing import Optional, Dict, Any, List
-import webbrowser
 
 import requests
 
@@ -30,12 +29,6 @@ class AuthManager:
 
         # 加载当前选择的账号
         self.current_account = self.config.get('current_account')
-
-    def open_auth_in_browser(self):
-        """在浏览器中打开授权页面"""
-        auth_url = 'main.html'
-        logger.info(f"打开授权URL: {auth_url}")
-        webbrowser.open(auth_url)
 
     def get_access_token(self, code: str, account_name: str) -> Dict[str, Any]:
         """使用授权码获取访问令牌"""
