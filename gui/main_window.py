@@ -3,7 +3,9 @@
 """
 from typing import Optional
 
-from PyQt5.QtWidgets import *
+from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QVBoxLayout, QStackedWidget, QHBoxLayout, QLabel, \
+    QPushButton, QAbstractItemView, QSizePolicy, QHeaderView, QShortcut, QFrame, QMenu, QMessageBox, QTableWidgetItem, \
+    QToolTip, QDialog, QStatusBar, QProgressBar, QAction, QFileDialog, QTableWidget
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer, QEvent, QPoint, QRect
 from PyQt5.QtGui import QIcon, QKeySequence
 
@@ -243,9 +245,49 @@ class MainWindow(QMainWindow):
         user_card.setMinimumHeight(600)
         user_layout = QVBoxLayout(user_card)
 
+        # 创建水平布局容器，用于用户信息和按钮
+        user_info_container = QWidget()
+        user_info_container_layout = QHBoxLayout(user_info_container)
+        user_info_container_layout.setContentsMargins(0, 0, 0, 0)
+        user_info_container_layout.setSpacing(10)
+
+        # 左侧用户信息标签
         self.user_info_label = QLabel()
-        self.user_info_label.setStyleSheet("font-size: 12px;")
-        user_layout.addWidget(self.user_info_label)
+        self.user_info_label.setObjectName("user")
+        user_info_container_layout.addWidget(self.user_info_label)
+
+        # 右侧按钮区域
+        button_widget = QWidget()
+        button_layout = QHBoxLayout(button_widget)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        # button_layout.setSpacing(5)
+
+        # 上传按钮
+        upload_btn = QPushButton("📤 上传")
+        upload_btn.setObjectName("uploadBtn")
+        upload_btn.setMaximumWidth(80)
+        upload_btn.clicked.connect(self.upload_file)
+        button_layout.addWidget(upload_btn)
+
+        # 新建文件夹按钮
+        create_folder_btn = QPushButton("📁 新建文件夹")
+        create_folder_btn.setObjectName("createDir")
+        create_folder_btn.setMaximumWidth(115)
+        # create_folder_btn.clicked.connect(self.create_folder)
+        button_layout.addWidget(create_folder_btn)
+
+        # 刷新按钮
+        refresh_btn = QPushButton("🔄 刷新")
+        refresh_btn.setObjectName("info")
+        refresh_btn.setMaximumWidth(80)
+        refresh_btn.clicked.connect(lambda: self.update_items(self.current_path))
+        button_layout.addWidget(refresh_btn)
+
+        # 添加到按钮区域
+        user_info_container_layout.addWidget(button_widget)
+
+        # 将用户信息容器添加到主布局
+        user_layout.addWidget(user_info_container)
 
         # 添加面包屑导航容器
         self.breadcrumb_widget = QWidget()
@@ -371,6 +413,19 @@ class MainWindow(QMainWindow):
 
         self.stacked_widget.addWidget(login_page)
         self.login_page = login_page
+
+    # 上传文件
+    def upload_file(self):
+        # 打开文件夹选择对话框
+        folder_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择要上传的文件夹",
+            "",
+            "所有文件 (*.*);;图片 (*.png *.jpg *.jpeg);;文本文件 (*.txt)",
+        )
+        if not folder_paths:
+            return
+        print(folder_paths)
 
     def update_breadcrumb(self, path="/"):
         """更新面包屑导航 - 使用按钮和标签手动拼接"""
@@ -561,7 +616,6 @@ class MainWindow(QMainWindow):
         self.current_worker.error.connect(self.on_rename_error)
         self.current_worker.start()
 
-
     def on_rename_success(self, result):
         # 重置状态
         self.renaming_item = self.original_text = None
@@ -590,7 +644,6 @@ class MainWindow(QMainWindow):
 
         # 清理工作线程引用
         self.current_worker = None
-
 
     # 泡泡提示
     def show_tooltip(self, pos: QPoint, text: str, p_str: Optional[QWidget], rect: QRect):
@@ -810,7 +863,7 @@ class MainWindow(QMainWindow):
         self.stacked_widget.setCurrentWidget(self.main_page)
 
         # 更新窗口标题
-        self.setWindowTitle(f'百度网盘工具箱 - {self.current_account}')
+        self.setWindowTitle(f'{self.current_account}')
 
         # 更新状态栏
         self.status_label.setText(f"已登录: {self.current_account}")

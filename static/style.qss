@@ -82,16 +82,20 @@ QPushButton:disabled {
     color: #999;
 }
 
-/* 主要按钮 */
-QPushButton#primary {
+/* 上传按钮 */
+QPushButton#uploadBtn {
     background-color: #2196F3;
     color: white;
     border-color: #2196F3;
 }
 
-QPushButton#primary:hover {
+QPushButton#uploadBtn:hover {
     background-color: #1976D2;
     border-color: #1976D2;
+}
+/* 新建文件夹按钮 */
+QPushButton#createDir {
+    width: 100px;
 }
 
 
@@ -299,6 +303,11 @@ QLabel#breadcrumbSeparator {
     font-size: 11px;
     padding: 0px 2px;
     margin: 0px;
+}
+
+/* 用户信息 */
+QLabel#user {
+    font-size: 12px;
 }
 
 /* QMessageBox 按钮样式 */
