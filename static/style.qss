@@ -10,6 +10,7 @@ QLabel#title {
     color: #000000;
     font-weight: bold;
 }
+
 /* 副标题样式 */
 QLabel#subtitle {
     font-size: 15px;
@@ -34,27 +35,60 @@ QLabel#authsteps {
     color: #555;
 }
 
+/* 导航按钮样式 */
+QPushButton#navButton {
+    background-color: transparent;
+    border: none;
+    border-bottom: 3px solid transparent;
+    padding: 8px 20px;
+    font-size: 14px;
+    font-weight: normal;
+    color: #666;
+    border-radius: 0;
+}
+
+QPushButton#navButton:hover {
+    background-color: #f5f5f5;
+    color: #333;
+}
+
+QPushButton#navButton:checked {
+    background-color: #e3f2fd;
+    color: #1976D2;
+    font-weight: bold;
+    border-bottom: 3px solid #1976D2;
+}
+
+QPushButton#navButton:pressed {
+    background-color: #bbdefb;
+}
+
 /* 授权按钮 */
 QPushButton#authbut {
     background-color: #2196F3;
     color: white;
+    border: 1px solid #2196F3;
 }
+
 QPushButton#authbut:hover {
     background-color: #1976D2;
+    border-color: #1976D2;
 }
+
 QPushButton#authbut:pressed {
     background-color: #1E88E5;
 }
-
 
 /* 登录按钮 */
 QPushButton#login {
     background-color: #2196F3;
     color: white;
 }
+
 QPushButton#login:hover {
     background-color: #1976D2;
 }
+
 QPushButton#login:pressed {
     background-color: #1E88E5;
 }
@@ -93,11 +127,23 @@ QPushButton#uploadBtn:hover {
     background-color: #1976D2;
     border-color: #1976D2;
 }
+
+/* 下载按钮 */
+QPushButton#downloadBtn {
+    background-color: #4CAF50;
+    color: white;
+    border-color: #4CAF50;
+}
+
+QPushButton#downloadBtn:hover {
+    background-color: #388E3C;
+    border-color: #388E3C;
+}
+
 /* 新建文件夹按钮 */
 QPushButton#createDir {
     width: 100px;
 }
-
 
 /* 警告按钮 */
 QPushButton#warning {
@@ -123,6 +169,30 @@ QPushButton#danger:hover {
     border-color: #D32F2F;
 }
 
+/* 成功按钮 */
+QPushButton#success {
+    background-color: #4CAF50;
+    color: white;
+    border-color: #4CAF50;
+}
+
+QPushButton#success:hover {
+    background-color: #388E3C;
+    border-color: #388E3C;
+}
+
+/* 信息按钮 */
+QPushButton#info {
+    background-color: #2196F3;
+    color: white;
+    border-color: #2196F3;
+}
+
+QPushButton#info:hover {
+    background-color: #1976D2;
+    border-color: #1976D2;
+}
+
 /* 表格样式 */
 QTableWidget {
     border-radius: 4px;
@@ -135,6 +205,7 @@ QTableWidget {
 
 QTableWidget::item {
     border-bottom: 1px solid #eee;
+    padding: 8px 4px;
 }
 
 QTableWidget::item:selected {
@@ -149,6 +220,15 @@ QHeaderView::section {
     font-weight: bold;
     font-size: 12px;
     min-height: 30px;
+}
+
+/* 传输表格特殊样式 */
+QTableWidget#transferTable {
+    font-size: 12px;
+}
+
+QTableWidget#transferTable::item {
+    padding: 4px;
 }
 
 /* 分组框样式 */
@@ -199,7 +279,6 @@ QCheckBox::indicator {
     height: 16px;
 }
 
-
 /* 状态栏进度条样式 */
 QProgressBar {
     border: 1px solid #cccccc;
@@ -211,6 +290,19 @@ QProgressBar {
 QProgressBar::chunk {
     background-color: #4CAF50;
     border-radius: 3px;
+}
+
+/* 传输进度条特殊样式 */
+QProgressBar#transferProgress {
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    text-align: center;
+}
+
+QProgressBar#transferProgress::chunk {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #2196F3, stop:1 #1976D2);
+    border-radius: 2px;
 }
 
 /* 状态栏取消按钮 */
@@ -308,6 +400,7 @@ QLabel#breadcrumbSeparator {
 /* 用户信息 */
 QLabel#user {
     font-size: 12px;
+    color: #666;
 }
 
 /* QMessageBox 按钮样式 */
@@ -320,44 +413,54 @@ QMessageBox QPushButton {
     font-size: 12px;
 }
 
-/*/* 响应式调整 - 小屏幕 */*/
-/*@media (max-width: 1200px) {*/
-/*    QTableWidget::item {*/
-/*        padding: 6px 3px;*/
-/*        font-size: 12px;*/
-/*    }*/
+/* 卡片样式 */
+QFrame#card {
+    background-color: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 15px;
+}
 
-/*    QHeaderView::section {*/
-/*        padding: 6px 3px;*/
-/*        font-size: 11px;*/
-/*    }*/
+/* 进度指示器 */
+QProgressBar:indeterminate {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #e3f2fd, stop:0.5 #2196F3, stop:1 #e3f2fd);
+    background-repeat: repeat-x;
+    border: none;
+}
 
-/*    QPushButton {*/
-/*        padding: 5px 10px;*/
-/*        font-size: 12px;*/
-/*        min-height: 28px;*/
-/*    }*/
-/*}*/
 
-/*/* 对话框按钮 */*/
-/*QDialogButtonBox QPushButton {*/
-/*    min-width: 80px;*/
-/*    min-height: 30px;*/
-/*}*/
+/* 顶部导航栏样式 - 确保按钮可见 */
+QWidget#topNav {
+    background-color: white;
+    border-bottom: 1px solid #dee2e6;
+    min-height: 50px;
+}
 
-/*/* 卡片样式 */*/
-/*QFrame {*/
-/*    background-color: white;*/
-/*}*/
+/* 标签按钮容器 */
+QWidget#tabContainer {
+    background-color: #f8f9fa;
+    border-bottom: 1px solid #dee2e6;
+}
 
-/*/* 文本编辑框 */*/
-/*QTextEdit {*/
-/*    border: 1px solid #ccc;*/
-/*    border-radius: 4px;*/
-/*    padding: 4px;*/
-/*    background-color: white;*/
-/*}*/
+/* 标签按钮基本样式 - 确保可见 */
+QPushButton#tabButton {
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-bottom: none;
+    font-size: 12px;
+    color: #495057;
+    margin: 4px 1px 0 1px;
+}
 
-/*QTextEdit:focus {*/
-/*    border: 1px solid #2196F3;*/
-/*}*/
+QPushButton#tabButton:hover {
+    background-color: #e9ecef;
+    color: #212529;
+}
+
+QPushButton#tabButton:checked {
+    background-color: white;
+    color: #007bff;
+    font-weight: bold;
+    border-color: #dee2e6 #dee2e6 white #dee2e6;
+}

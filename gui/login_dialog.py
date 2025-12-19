@@ -284,7 +284,7 @@ class ValidationWorker(QThread):
                 return self.finished.emit(result)
 
             # 已存在的账号：检测token并获取信息
-            account_info = self.login_dialog.config['accounts'][self.login_dialog.file_list.selectedItems()[0].text()]
+            account_info = self.login_dialog.config['accounts'][self.login_dialog.account_list.selectedItems()[0].text()]
 
             # 刷新token
             if account_info['expires_at'] <= time.time() + 86400:
