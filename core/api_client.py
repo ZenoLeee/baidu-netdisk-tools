@@ -3,7 +3,7 @@ API客户端模块
 """
 import json
 import time
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -11,6 +11,7 @@ import requests
 from utils.config_manager import ConfigManager
 from utils.logger import get_logger
 from core.models import FileInfo
+from core.constants import APIConstants, FileConstants, AuthConstants, TimeConstants
 
 logger = get_logger(__name__)
 
@@ -19,12 +20,12 @@ class BaiduPanAPI:
 
     def __init__(self):
         self.config = ConfigManager()
-        self.client_id = self.config.get('client_id', 'mu79W8Z84iu8eV6cUvru2ckcGtsz5bxL')
-        self.client_secret = self.config.get('client_secret', 'K0AVQhS6RyWg2ZNCo4gzdGSftAa4BjIE')
-        self.redirect_uri = self.config.get('redirect_uri', 'http://8.138.162.11:8939/')
+        self.client_id = self.config.get('client_id')
+        self.client_secret = self.config.get('client_secret')
+        self.redirect_uri = self.config.get('redirect_uri')
         self.host = 'https://pan.baidu.com'
-        self.timeout = 10
-        self._executor = ThreadPoolExecutor(max_workers=5)
+        self.timeout = APIConstants.DEFAULT_TIMEOUT
+        self._executor = ThreadPoolExecutor(max_workers=APIConstants.MAX_WORKERS)
 
         # 认证状态
         self.current_account: Optional[str] = None
@@ -98,7 +99,7 @@ class BaiduPanAPI:
                 return False
 
         # 检查令牌是否过期
-        if self.expires_at and time.time() > self.expires_at - 300:  # 提前5分钟刷新
+        if self.expires_at and time.time() > self.expires_at - TimeConstants.TOKEN_REFRESH_ADVANCE:
             logger.info('访问令牌即将过期，尝试刷新...')
             return self.refresh_access_token()
 
@@ -117,7 +118,7 @@ class BaiduPanAPI:
         }
 
         try:
-            response = requests.post(url, params=params, timeout=10)
+            response = requests.post(url, params=params, timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
 
@@ -131,7 +132,7 @@ class BaiduPanAPI:
                     'account_name': user_info['baidu_name'],
                     'access_token': data['access_token'],
                     'refresh_token': data['refresh_token'],
-                    'expires_at': time.time() + data.get('expires_in', 2592000),
+                    'expires_at': time.time() + data.get('expires_in', TimeConstants.DEFAULT_TOKEN_EXPIRE),
                     'code': code,
                     'last_used': time.time()
                 }
@@ -170,13 +171,13 @@ class BaiduPanAPI:
         }
 
         try:
-            response = requests.post(url, params=params, timeout=10)
+            response = requests.post(url, params=params, timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
 
             if 'access_token' in data:
                 # 更新账号数据
-                expires_at = time.time() + data.get('expires_in', 2592000)
+                expires_at = time.time() + data.get('expires_in', TimeConstants.DEFAULT_TOKEN_EXPIRE)
                 updates = {
                     'access_token': data['access_token'],
                     'refresh_token': data.get('refresh_token', self.refresh_token),
@@ -201,9 +202,18 @@ class BaiduPanAPI:
             logger.error(f'刷新令牌请求失败: {e}')
             return False
 
-    # 其他原有API方法保持不变
-    def _make_request(self, method: str, endpoint: str, **kwargs) -> Optional[Dict[str, Any]] |  Any:
-        """发送请求"""
+    def _make_request(self, method: str, endpoint: str, **kwargs) -> Optional[Dict[str, Any]]:
+        """
+        发送 HTTP 请求
+
+        Args:
+            method: HTTP 方法（GET、POST 等）
+            endpoint: API 端点路径
+            **kwargs: 其他请求参数
+
+        Returns:
+            API 响应数据字典，失败时返回错误信息字符串
+        """
         if not self.is_authenticated():
             logger.error('未认证，请先登录')
             return None
@@ -233,7 +243,7 @@ class BaiduPanAPI:
             if result.get('errno') != 0:
                 logger.error(f'API返回错误: {result.get("errmsg", "未知错误")}, errno: {result.get("errno")}')
                 # 如果令牌失效，尝试刷新
-                if result.get('errno') in [110, 111]:  # 常见的认证错误码
+                if result.get('errno') in [AuthConstants.TOKEN_EXPIRED, AuthConstants.TOKEN_INVALID]:
                     logger.info('检测到认证失效，尝试刷新令牌...')
                     if self.refresh_access_token():
                         # 重试请求
@@ -273,7 +283,7 @@ class BaiduPanAPI:
         result = self._make_request('GET', '/api/quota', params={'checkfree': 1, 'checkexpire': 1})
         return result
 
-    def list_files(self, path: str = '/', start: int = 0, limit: int = 1000, order: str = 'name', desc: int = 0) -> List[Dict[str, Any]]:
+    def list_files(self, path: str = '/', start: int = 0, limit: int = FileConstants.DEFAULT_PAGE_SIZE, order: str = 'name', desc: int = 0) -> List[Dict[str, Any]]:
         """
         列出文件
 
@@ -314,7 +324,7 @@ class BaiduPanAPI:
             path: 目录路径
         """
         folders = []
-        items = self.list_files(path, limit=1000)
+        items = self.list_files(path, limit=FileConstants.MAX_LIST_LIMIT)
 
         for item in items:
             if item.get('isdir') == 1:
@@ -415,7 +425,7 @@ class BaiduPanAPI:
                 logger.error("创建文件夹失败: 请求返回空")
             return False
 
-    def search_files(self, keyword: str, path: str = '/', recursion: int = 1, start: int = 0, limit: int = 1000) -> List[Dict[str, Any]]:
+    def search_files(self, keyword: str, path: str = '/', recursion: int = FileConstants.RECURSION_SEARCH_ENABLED, start: int = 0, limit: int = FileConstants.DEFAULT_PAGE_SIZE) -> List[Dict[str, Any]]:
         """
         搜索文件
 

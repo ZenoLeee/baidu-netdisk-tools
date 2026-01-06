@@ -9,18 +9,19 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QAbstractItemView, QSizePolicy,
     QHeaderView, QShortcut, QFrame, QMenu, QMessageBox, QTableWidgetItem,
     QToolTip, QDialog, QStatusBar, QProgressBar, QAction, QFileDialog,
-    QInputDialog, QLineEdit, QProgressDialog
+    QInputDialog, QLineEdit, QProgressDialog, QListWidget, QListWidgetItem, QStyle
 )
 from PyQt5.QtCore import (
     Qt, QTimer, QPoint, QRect
 )
-from PyQt5.QtGui import QIcon, QKeySequence, QCursor
+from PyQt5.QtGui import QIcon, QKeySequence, QCursor, QColor
 
 from gui.login_dialog import LoginDialog
 from core.api_client import BaiduPanAPI
 from gui.style import AppStyles
 from utils.logger import get_logger
 from utils.config_manager import ConfigManager
+from core.constants import AppConstants, UploadConstants, UIConstants
 
 # 从新模块导入
 from core.transfer_manager import TransferManager
@@ -37,6 +38,11 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+
+        # 切换账号标志
+        self.is_switching_account = False
+        # 文件加载标志
+        self.is_loading_files = False
 
         # 初始化组件
         self.original_text = None  # 存储原始文本
@@ -138,8 +144,8 @@ class MainWindow(QMainWindow):
 
     def setup_ui(self):
         """设置UI"""
-        self.setWindowTitle('百度网盘工具箱')
-        self.setMinimumSize(1200, 800)
+        self.setWindowTitle(AppConstants.APP_NAME)
+        self.setMinimumSize(AppConstants.WINDOW_MIN_WIDTH, AppConstants.WINDOW_MIN_HEIGHT)
 
         # 设置样式
         self.setStyleSheet(AppStyles.get_stylesheet())
@@ -217,18 +223,26 @@ class MainWindow(QMainWindow):
         # 用户信息和退出登录按钮区域
         self.user_info_widget = QWidget()
         user_info_layout = QHBoxLayout(self.user_info_widget)
-        user_info_layout.setContentsMargins(10, 0, 10, 0)
-        user_info_layout.setSpacing(15)
+        user_info_layout.setContentsMargins(15, 0, 15, 0)
+        user_info_layout.setSpacing(10)
 
         # 用户信息标签
         self.user_info_label_nav = QLabel()
         self.user_info_label_nav.setObjectName('user')
         user_info_layout.addWidget(self.user_info_label_nav)
 
+        # 切换账号按钮
+        self.switch_account_btn = QPushButton('🔄 切换账号')
+        self.switch_account_btn.setObjectName('switchAccount')
+        self.switch_account_btn.setCursor(Qt.PointingHandCursor)
+        self.switch_account_btn.setToolTip('切换到其他已登录的账号')
+        self.switch_account_btn.clicked.connect(self.show_switch_account_dialog)
+        user_info_layout.addWidget(self.switch_account_btn)
+
         # 退出登录按钮
         self.logout_btn_nav = QPushButton('退出登录')
         self.logout_btn_nav.setObjectName('danger')
-        self.logout_btn_nav.setMaximumWidth(80)
+        self.logout_btn_nav.setCursor(Qt.PointingHandCursor)
         self.logout_btn_nav.clicked.connect(self.logout)
         user_info_layout.addWidget(self.logout_btn_nav)
 
@@ -322,12 +336,12 @@ class MainWindow(QMainWindow):
         user_layout.addWidget(self.breadcrumb_widget)
 
         # 文件列表设置
-        self.file_table = DragDropTableWidget()  # 修改这里
+        self.file_table = DragDropTableWidget()
         self.file_table.setColumnCount(3)  # 3列：文件名、大小、修改时间
         self.file_table.setHorizontalHeaderLabels(['文件名', '大小', '修改时间'])
         self.file_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.file_table.horizontalHeader().setStretchLastSection(True)
-        self.file_table.verticalHeader().setDefaultSectionSize(30)  # 行高
+        self.file_table.verticalHeader().setDefaultSectionSize(UIConstants.TABLE_ROW_HEIGHT)
         self.file_table.verticalHeader().setVisible(False)  # 隐藏行号
         self.file_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.file_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -453,9 +467,6 @@ class MainWindow(QMainWindow):
         progress_dialog.setWindowModality(Qt.WindowModal)
         progress_dialog.setMinimumDuration(0)
 
-        # 设置分片大小（百度网盘推荐4MB）
-        CHUNK_SIZE = 4 * 1024 * 1024  # 4MB
-
         for i, file_path in enumerate(file_paths):
             if progress_dialog.wasCanceled():
                 break
@@ -478,15 +489,15 @@ class MainWindow(QMainWindow):
                     continue
 
                 # 检查是否需要分片上传
-                if file_size > CHUNK_SIZE:
+                if file_size > UploadConstants.CHUNK_SIZE:
                     # 大文件，需要分片上传并显示断点续传状态
-                    total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+                    total_chunks = (file_size + UploadConstants.CHUNK_SIZE - 1) // UploadConstants.CHUNK_SIZE
 
                     # 添加上传任务（自动启用分片上传）
                     task = self.transfer_page.add_upload_task(
                         file_path,
                         self.current_path,
-                        chunk_size=CHUNK_SIZE,
+                        chunk_size=UploadConstants.CHUNK_SIZE,
                         enable_resume=True  # 启用断点续传
                     )
 
@@ -498,7 +509,7 @@ class MainWindow(QMainWindow):
                         uploaded_count += 1
 
                         # 如果文件很大，显示提示
-                        if file_size > 100 * 1024 * 1024:  # 大于100MB
+                        if file_size > UploadConstants.LARGE_FILE_THRESHOLD:
                             QMessageBox.information(
                                 self,
                                 "大文件上传",
@@ -556,6 +567,10 @@ class MainWindow(QMainWindow):
     # 上传文件
     def upload_file(self):
         """上传文件"""
+        # 检查是否正在加载文件或切换账号
+        if self.is_loading_files or self.is_switching_account:
+            return
+
         # 打开文件选择对话框
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
@@ -577,6 +592,10 @@ class MainWindow(QMainWindow):
     # 下载文件
     def download_selected_file(self):
         """下载选中的文件"""
+        # 检查是否正在加载文件或切换账号
+        if self.is_loading_files or self.is_switching_account:
+            return
+
         selected_items = self.file_table.selectedItems()
         if not selected_items:
             QMessageBox.warning(self, "提示", "请先选择一个文件")
@@ -633,22 +652,58 @@ class MainWindow(QMainWindow):
             return 0
 
     def create_folder_dialog(self):
-        """创建文件夹对话框"""
-        folder_name, ok = QInputDialog.getText(
-            self,
-            "新建文件夹",
-            "请输入文件夹名称:",
-            QLineEdit.Normal,
-            ""
-        )
+        """创建文件夹（直接在列表中编辑）"""
+        # 检查是否正在加载文件或切换账号
+        if self.is_loading_files or self.is_switching_account:
+            return
 
-        if ok and folder_name.strip():
-            full_path = f"{self.current_path.rstrip('/')}/{folder_name.strip()}"
-            if self.api_client.create_folder(full_path):
-                QMessageBox.information(self, "成功", f"文件夹 '{folder_name}' 创建成功")
-                self.update_items(self.current_path)
-            else:
-                QMessageBox.warning(self, "失败", "文件夹创建失败")
+        # 检查是否已经有正在创建的文件夹
+        if getattr(self, 'creating_folder', False):
+            logger.warning("已有正在创建的文件夹，忽略此次请求")
+            return
+
+        # 检查第一行是否是空的编辑项（可能是上次未完成的）
+        if self.file_table.rowCount() > 0:
+            first_item = self.file_table.item(0, 0)
+            if first_item and not first_item.text():
+                logger.info("清理第一行的空项")
+                self.file_table.removeRow(0)
+
+        # 在列表顶部插入一个新行
+        self.file_table.insertRow(0)
+
+        # 创建文件夹图标项
+        icon_item = QTableWidgetItem()
+        icon_item.setIcon(self.style().standardIcon(QStyle.SP_DirIcon))
+        icon_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+        self.file_table.setItem(0, 0, icon_item)
+
+        # 设置为空字符串，用户可以直接输入
+        icon_item.setText("")
+
+        # 选中该行并开始编辑
+        self.file_table.selectRow(0)
+        self.file_table.editItem(icon_item)
+
+        # 标记为新建文件夹状态，on_item_changed 会处理
+        self.creating_folder = True
+
+        logger.info("开始创建新文件夹")
+
+    def _is_valid_folder_name(self, name: str) -> bool:
+        """检查文件夹名称是否合法"""
+        # Windows 非法字符
+        illegal_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*']
+        for char in illegal_chars:
+            if char in name:
+                return False
+        # 检查是否以点开头
+        if name.startswith('.'):
+            return False
+        # 检查长度
+        if len(name) > 255:
+            return False
+        return True
 
     def update_breadcrumb(self, path="/"):
         """更新面包屑导航"""
@@ -719,6 +774,10 @@ class MainWindow(QMainWindow):
             self.current_worker.stop()
             self.current_worker.wait()
 
+        # 设置加载标志
+        self.is_loading_files = True
+
+        self.current_path = path
         self.file_table.setEnabled(False)
         self.show_status_progress(f"正在加载: {path}")
         self.update_breadcrumb(path)
@@ -733,6 +792,10 @@ class MainWindow(QMainWindow):
 
     def show_file_table_menu(self, position):
         """显示文件表格的右键菜单"""
+        # 检查是否正在加载文件或切换账号
+        if self.is_loading_files or self.is_switching_account:
+            return
+
         item = self.file_table.itemAt(position)
         menu = QMenu()
 
@@ -749,6 +812,9 @@ class MainWindow(QMainWindow):
                 menu.addAction("✏️ 重命名", lambda: self.rename_file(item))
                 menu.addAction("🗑️ 删除", lambda: self.delete_file(data))
         else:
+            # 空白处右键，添加新建文件夹选项
+            menu.addAction("📁 新建文件夹", self.create_folder_dialog)
+            menu.addSeparator()
             menu.addAction("🔄 刷新", lambda: self.update_items(self.current_path))
             menu.addAction("✓ 全选", self.file_table.selectAll)
 
@@ -772,6 +838,82 @@ class MainWindow(QMainWindow):
 
     def on_item_changed(self, item):
         """处理单元格内容变化"""
+        # 处理新建文件夹的情况
+        if getattr(self, 'creating_folder', False) and item.row() == 0 and item.column() == 0:
+            self.creating_folder = False
+            folder_name = item.text().strip()
+
+            logger.info(f"新建文件夹编辑完成: '{folder_name}'")
+
+            # 如果没有输入名字，删除该行
+            if not folder_name:
+                logger.info("文件夹名称为空，取消创建")
+                QTimer.singleShot(0, lambda: self.file_table.removeRow(0))
+                self.status_label.setText("未创建文件夹")
+                return
+
+            # 检查名字是否合法
+            if not self._is_valid_folder_name(folder_name):
+                logger.warning(f"文件夹名称无效: '{folder_name}'")
+                QMessageBox.warning(self, "提示", "文件夹名称包含非法字符")
+                QTimer.singleShot(0, lambda: self.file_table.removeRow(0))
+                self.status_label.setText("文件夹名称无效")
+                return
+
+            # 检查是否已存在同名文件/文件夹
+            for row_idx in range(self.file_table.rowCount()):
+                if row_idx == 0:  # 跳过正在编辑的行
+                    continue
+                existing_item = self.file_table.item(row_idx, 0)
+                if existing_item and existing_item.text() == folder_name:
+                    logger.warning(f"文件夹已存在: '{folder_name}'")
+                    QMessageBox.warning(self, "提示", f"已存在名为 '{folder_name}' 的文件或文件夹")
+                    QTimer.singleShot(0, lambda: self.file_table.removeRow(0))
+                    self.status_label.setText("取消创建文件夹")
+                    return
+
+            # 创建文件夹
+            full_path = f"{self.current_path.rstrip('/')}/{folder_name}"
+            logger.info(f"开始创建文件夹: {full_path}")
+
+            # 临时禁用表格
+            self.file_table.setEnabled(False)
+            self.show_status_progress("正在创建文件夹...")
+
+            # 在后台线程中创建
+            from PyQt5.QtCore import QThreadPool, QRunnable
+
+            class CreateFolderTask(QRunnable):
+                def __init__(self, api_client, path, callback):
+                    super().__init__()
+                    self.api_client = api_client
+                    self.path = path
+                    self.callback = callback
+
+                def run(self):
+                    result = self.api_client.create_folder(self.path)
+                    self.callback(result)
+
+            def on_create_complete(result):
+                self.hide_status_progress()
+                self.file_table.setEnabled(True)
+
+                if result:
+                    logger.info(f"文件夹创建成功: {folder_name}")
+                    self.status_label.setText(f"文件夹 '{folder_name}' 创建成功")
+                    # 刷新当前目录
+                    self.update_items(self.current_path)
+                else:
+                    logger.error(f"文件夹创建失败: {folder_name}")
+                    # 使用 QTimer 延迟显示消息框，避免在回调中直接显示
+                    QTimer.singleShot(0, lambda: self._show_create_folder_error(folder_name))
+
+            # 创建并启动任务
+            task = CreateFolderTask(self.api_client, full_path, on_create_complete)
+            QThreadPool.globalInstance().start(task)
+            return
+
+        # 原有的重命名逻辑
         if self.renaming_item != item:
             return
 
@@ -818,6 +960,17 @@ class MainWindow(QMainWindow):
         self.current_worker.finished.connect(self.on_rename_success)
         self.current_worker.error.connect(self.on_rename_error)
         self.current_worker.start()
+
+    def _show_create_folder_error(self, folder_name):
+        """显示创建文件夹失败的错误消息"""
+        # 安全地删除第一行（如果存在）
+        if self.file_table.rowCount() > 0:
+            first_item = self.file_table.item(0, 0)
+            if first_item and first_item.text() == folder_name:
+                self.file_table.removeRow(0)
+                logger.info(f"已删除失败的文件夹行: {folder_name}")
+
+        QMessageBox.warning(self, "失败", f"文件夹 '{folder_name}' 创建失败")
 
     def on_rename_success(self, result):
         self.renaming_item = self.original_text = None
@@ -901,6 +1054,10 @@ class MainWindow(QMainWindow):
         item = self.file_table.item(row, 0)
         data = item.data(Qt.UserRole)
 
+        # 如果没有 data，说明可能是新建文件夹还未刷新，忽略
+        if not data:
+            return
+
         if not data['is_dir']:
             # 如果是文件，可以下载
             self.download_file(item, data['path'])
@@ -912,6 +1069,10 @@ class MainWindow(QMainWindow):
             self.current_worker.stop()
             self.current_worker.wait()
 
+        # 设置加载标志
+        self.is_loading_files = True
+
+        self.current_path = path
         self.file_table.setEnabled(False)
         self.show_status_progress(f"正在加载: {path}")
         self.update_breadcrumb(path)
@@ -925,6 +1086,8 @@ class MainWindow(QMainWindow):
         self.current_worker.start()
 
     def on_directory_success(self, result):
+        """目录加载成功回调"""
+        self.is_loading_files = False  # 清除加载标志
         self.hide_status_progress()
         self.file_table.setRowCount(0)
         self.set_list_items(result)
@@ -933,6 +1096,7 @@ class MainWindow(QMainWindow):
         self.current_worker = None
 
     def on_directory_load_error(self, error_msg):
+        self.is_loading_files = False  # 清除加载标志
         self.hide_status_progress()
         self.file_table.setEnabled(True)
         self.status_label.setText(f"错误: {error_msg}")
@@ -1011,6 +1175,274 @@ class MainWindow(QMainWindow):
         self.setEnabled(False)
         login_dialog.exec_()
 
+    def show_switch_account_dialog(self):
+        """显示切换账号对话框"""
+        try:
+            if not self.api_client:
+                QMessageBox.warning(self, "提示", "请先登录")
+                return
+
+            # 获取所有已保存的账号
+            all_accounts = self.api_client.get_all_accounts()
+
+            if not all_accounts or len(all_accounts) <= 1:
+                QMessageBox.information(
+                    self,
+                    "提示",
+                    "当前只有一个账号，请先登录其他账号后再切换"
+                )
+                return
+
+            # 重新排序：当前账号排在第一位
+            sorted_accounts = []
+            for account_name in all_accounts:
+                if account_name == self.current_account:
+                    sorted_accounts.insert(0, account_name)  # 插入到第一位
+                else:
+                    sorted_accounts.append(account_name)
+
+            # 设置切换账号标志
+            self.is_switching_account = True
+
+            # 禁用主窗口，防止在切换过程中进行其他操作
+            self.setEnabled(False)
+            QApplication.processEvents()  # 立即处理事件以更新UI
+
+            # 创建账号选择对话框
+            dialog = QDialog(self)
+            dialog.setWindowTitle('切换账号')
+            dialog.setFixedSize(450, 350)
+
+            layout = QVBoxLayout(dialog)
+            layout.setSpacing(15)
+
+            # 标题
+            title_label = QLabel('选择要切换的账号')
+            title_label.setStyleSheet('font-size: 16px; font-weight: bold; padding: 5px;')
+            layout.addWidget(title_label)
+
+            # 账号列表
+            account_list = QListWidget()
+
+            # 明确禁用交替行颜色
+            account_list.setAlternatingRowColors(False)
+
+            # 简单的容器样式
+            account_list.setStyleSheet('''
+                QListWidget {
+                    border: 1px solid #ddd;
+                    border-radius: 5px;
+                    padding: 5px;
+                    background-color: white;
+                    outline: none;
+                }
+                QListWidget::item {
+                    padding: 12px;
+                    border-radius: 3px;
+                    font-size: 13px;
+                }
+                QListWidget::item:selected {
+                    background-color: #2196F3;
+                    color: white;
+                }
+            ''')
+
+            # 添加账号到列表 - 当前账号排在第一位
+            for account_name in sorted_accounts:
+                if account_name == self.current_account:
+                    # 当前账号 - 浅蓝色背景，不可选择
+                    display_text = f"📍 {account_name} (当前)"
+                    item = QListWidgetItem(display_text)
+                    item.setData(Qt.UserRole, account_name)
+
+                    # 直接设置背景色和前景色
+                    from PyQt5.QtGui import QBrush, QColor
+                    item.setBackground(QBrush(QColor(200, 230, 255)))  # 浅蓝色
+                    item.setForeground(QBrush(QColor(60, 90, 110)))    # 深灰蓝色
+
+                    # 设置为不可选择
+                    item.setFlags(Qt.ItemIsEnabled)
+                    item.setToolTip("这是当前账号，无法切换")
+                else:
+                    # 其他账号 - 白色背景，可选择
+                    display_text = f"👤 {account_name}"
+                    item = QListWidgetItem(display_text)
+                    item.setData(Qt.UserRole, account_name)
+
+                    # 直接设置背景色和前景色
+                    from PyQt5.QtGui import QBrush, QColor
+                    item.setBackground(QBrush(QColor(255, 255, 255)))  # 白色
+                    item.setForeground(QBrush(QColor(0, 0, 0)))        # 黑色
+
+                    # 设置可选择
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+
+                account_list.addItem(item)
+
+            layout.addWidget(account_list)
+
+            # 按钮区域
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
+
+            cancel_btn = QPushButton('取消')
+            cancel_btn.setMinimumWidth(80)
+            cancel_btn.clicked.connect(dialog.reject)
+            button_layout.addWidget(cancel_btn)
+
+            switch_btn = QPushButton('切换')
+            switch_btn.setObjectName('authbut')
+            switch_btn.setMinimumWidth(80)
+            switch_btn.clicked.connect(lambda: self.switch_to_account(dialog, account_list))
+            button_layout.addWidget(switch_btn)
+
+            layout.addLayout(button_layout)
+
+            # 双击直接切换（不需要确认）
+            account_list.itemDoubleClicked.connect(lambda: self.switch_to_account_direct(dialog, account_list))
+
+            # 对话框关闭时延迟恢复主窗口，清除所有待处理的事件
+            dialog.finished.connect(self._on_account_dialog_finished)
+
+            dialog.exec_()
+
+        except Exception as e:
+            logger.error(f"显示切换账号对话框时出错: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "错误", f"打开切换账号对话框失败: {str(e)}")
+            self._finish_switching_account()  # 确保在出错时也能恢复
+
+    def switch_to_account_direct(self, dialog: QDialog, account_list: 'QListWidget'):
+        """直接切换账号（双击触发，不需要确认）"""
+        try:
+            selected_items = account_list.selectedItems()
+            if not selected_items:
+                return
+
+            # 从 UserRole 中获取账号名称
+            account_name = selected_items[0].data(Qt.UserRole)
+
+            if not account_name:
+                return  # 静默忽略，不应该发生
+
+            # 如果点击的是当前账号，不允许切换
+            if account_name == self.current_account:
+                return  # 静默忽略
+
+            # 直接切换，不需要确认
+            dialog.accept()
+
+            # 显示加载状态
+            self.status_label.setText(f"正在切换到账号: {account_name}...")
+            self.show_status_progress(f"正在切换账号...")
+            QApplication.processEvents()
+
+            # 执行切换
+            if self.api_client.switch_account(account_name):
+                self.current_account = account_name
+                self.update_user_info()
+                self.update_items(self.current_path)
+                self.hide_status_progress()
+                self.status_label.setText(f"已切换到账号: {account_name}")
+                logger.info(f"成功切换到账号: {account_name}")
+            else:
+                self.hide_status_progress()
+                QMessageBox.critical(self, "错误", f"切换账号失败")
+                logger.error(f"切换账号失败: {account_name}")
+                self.status_label.setText("账号切换失败")
+
+        except Exception as e:
+            logger.error(f"切换账号时出错: {e}")
+            import traceback
+            traceback.print_exc()
+            dialog.reject()
+            self.hide_status_progress()
+            self.status_label.setText("账号切换失败")
+
+    def _on_account_dialog_finished(self):
+        """对话框关闭后的处理"""
+        # 使用定时器延迟恢复，清除所有待处理的点击事件
+        QTimer.singleShot(100, self._finish_switching_account)
+
+    def _finish_switching_account(self):
+        """完成账号切换，恢复UI"""
+        self.is_switching_account = False
+        self.setEnabled(True)
+        QApplication.processEvents()
+
+    def switch_to_account(self, dialog: QDialog, account_list: 'QListWidget'):
+        """切换到选中的账号（按钮触发，需要确认）"""
+        try:
+            selected_items = account_list.selectedItems()
+            if not selected_items:
+                QMessageBox.warning(dialog, "提示", "请选择一个账号")
+                return
+
+            # 从 UserRole 中获取账号名称
+            account_name = selected_items[0].data(Qt.UserRole)
+
+            if not account_name:
+                QMessageBox.warning(dialog, "错误", "无法获取账号信息")
+                return
+
+            # 如果点击的是当前账号，不需要切换
+            if account_name == self.current_account:
+                QMessageBox.information(dialog, "提示", "当前已经是该账号")
+                dialog.accept()
+                return
+
+            # 确认切换
+            reply = QMessageBox.question(
+                dialog,
+                '确认切换',
+                f"确定要切换到账号 '{account_name}' 吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+
+            if reply == QMessageBox.Yes:
+                dialog.accept()
+
+                # 显示加载状态
+                self.status_label.setText(f"正在切换到账号: {account_name}...")
+                self.show_status_progress(f"正在切换账号...")
+                QApplication.processEvents()
+
+                # 执行切换
+                if self.api_client.switch_account(account_name):
+                    self.current_account = account_name
+
+                    # 停止所有正在进行的文件加载任务
+                    if self.current_worker and self.current_worker.isRunning():
+                        logger.info("停止正在进行的文件加载任务")
+                        self.current_worker.stop()
+                        self.current_worker.wait()
+
+                    self.current_path = "/"
+                    self.update_user_info()
+                    self.hide_status_progress()
+                    self.status_label.setText(f"已切换到账号: {account_name}")
+
+                    # 直接刷新文件列表
+                    self.file_table.setRowCount(0)
+                    self.update_items("/")
+                    logger.info(f"成功切换到账号: {account_name}")
+                else:
+                    self.hide_status_progress()
+                    QMessageBox.critical(self, "错误", f"切换账号失败")
+                    logger.error(f"切换账号失败: {account_name}")
+                    self.status_label.setText("账号切换失败")
+
+        except Exception as e:
+            logger.error(f"切换账号时出错: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(dialog, "错误", f"切换账号失败: {str(e)}")
+            dialog.reject()
+            self.hide_status_progress()
+            self.status_label.setText("账号切换失败")
+
     def logout(self):
         """退出登录"""
         reply = QMessageBox.question(
@@ -1036,6 +1468,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("已退出登录")
 
     def setup_statusbar(self):
+        """设置状态栏"""
         statusbar = QStatusBar()
         self.setStatusBar(statusbar)
 
@@ -1051,11 +1484,13 @@ class MainWindow(QMainWindow):
         self.status_progress.setMaximumWidth(200)
         self.status_progress.setMinimumWidth(150)
         self.status_progress.setVisible(False)
+        self.status_progress.setTextVisible(False)
         temp_layout.addWidget(self.status_progress)
 
         self.cancel_button = QPushButton("取消")
         self.cancel_button.setMaximumWidth(60)
         self.cancel_button.setVisible(False)
+        self.cancel_button.setCursor(Qt.PointingHandCursor)
         self.cancel_button.clicked.connect(self.cancel_current_operation)
         temp_layout.addWidget(self.cancel_button)
 
@@ -1083,6 +1518,9 @@ class MainWindow(QMainWindow):
         exit_action.setShortcut('Ctrl+Q')
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
+        # 更新菜单栏
+        self.menuBar().setNativeMenuBar(False)  # Windows 系统需要禁用原生菜单栏
 
         # 帮助菜单
         help_menu = menubar.addMenu('帮助(&H)')

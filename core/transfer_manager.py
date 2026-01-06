@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 from core.api_client import BaiduPanAPI
 from utils.logger import get_logger
+from core.constants import UploadConstants
 
 logger = get_logger(__name__)
 
@@ -26,7 +27,7 @@ class TransferTask:
     # 分片上传相关
     total_chunks: int = 0
     current_chunk: int = 0
-    chunk_size: int = 4 * 1024 * 1024  # 4MB
+    chunk_size: int = UploadConstants.CHUNK_SIZE
     uploaded_chunks: List[int] = field(default_factory=list)
     
     # 断点续传相关

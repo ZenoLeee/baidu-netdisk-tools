@@ -492,3 +492,254 @@ QPushButton#minTabButton:checked {
 QTableWidget#transTable {
 
 }
+
+/* 切换账号按钮样式 */
+QPushButton#switchAccount {
+    background-color: #FF9800;
+    color: white;
+    border: 1px solid #FF9800;
+    padding: 6px 12px;
+    font-size: 12px;
+    border-radius: 4px;
+    min-width: 85px;
+}
+
+QPushButton#switchAccount:hover {
+    background-color: #F57C00;
+    border-color: #F57C00;
+}
+
+QPushButton#switchAccount:pressed {
+    background-color: #EF6C00;
+}
+
+/* 顶部导航栏优化 */
+QWidget#topNav {
+    background-color: white;
+    border-bottom: 2px solid #e0e0e0;
+    min-height: 55px;
+}
+
+/* 标签容器优化 */
+QWidget#tabContainer {
+    background-color: transparent;
+    border: none;
+}
+
+/* 用户信息区域优化 */
+QLabel#user {
+    font-size: 13px;
+    color: #333;
+    font-weight: 500;
+    padding: 4px 8px;
+    background-color: #f5f5f5;
+    border-radius: 4px;
+}
+
+/* 按钮通用优化 - 改善间距和视觉效果 */
+QPushButton {
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: 1px solid #ddd;
+    background-color: white;
+    font-size: 13px;
+    min-height: 32px;
+    transition: all 0.2s;
+}
+
+QPushButton:hover {
+    background-color: #f8f9fa;
+    border-color: #ccc;
+}
+
+QPushButton:pressed {
+    background-color: #e9ecef;
+}
+
+/* 卡片样式优化 */
+QFrame#card {
+    background-color: white;
+    border: 1px solid #e8e8e8;
+    border-radius: 10px;
+    padding: 20px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+/* 表格样式优化 */
+QTableWidget {
+    border-radius: 8px;
+    background-color: white;
+    alternate-background-color: #fafafa;
+    selection-background-color: #e3f2fd;
+    selection-color: #1565C0;
+    gridline-color: #f0f0f0;
+    border: 1px solid #e8e8e8;
+}
+
+QTableWidget::item {
+    border-bottom: 1px solid #f0f0f0;
+    padding: 10px 6px;
+}
+
+QTableWidget::item:selected {
+    background-color: #e3f2fd;
+    color: #1565C0;
+}
+
+QHeaderView::section {
+    background-color: #f8f9fa;
+    padding: 10px 6px;
+    border: none;
+    border-bottom: 2px solid #e0e0e0;
+    border-right: 1px solid #f0f0f0;
+    font-weight: 600;
+    font-size: 12px;
+    color: #444;
+    min-height: 35px;
+}
+
+/* 滚动条优化 */
+QScrollBar:vertical {
+    border: none;
+    background-color: #f5f5f5;
+    width: 12px;
+    border-radius: 6px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #bdbdbd;
+    min-height: 30px;
+    border-radius: 6px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: #9e9e9e;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QScrollBar:horizontal {
+    border: none;
+    background-color: #f5f5f5;
+    height: 12px;
+    border-radius: 6px;
+}
+
+QScrollBar::handle:horizontal {
+    background-color: #bdbdbd;
+    min-width: 30px;
+    border-radius: 6px;
+    margin: 2px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background-color: #9e9e9e;
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+
+/* 输入框优化 */
+QLineEdit, QComboBox, QSpinBox {
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 8px 12px;
+    background-color: white;
+    min-height: 20px;
+}
+
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+    border: 2px solid #2196F3;
+    padding: 7px 11px;
+}
+
+/* 进度条优化 */
+QProgressBar {
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    text-align: center;
+    background-color: #f5f5f5;
+    font-size: 11px;
+    font-weight: 500;
+}
+
+QProgressBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #2196F3, stop:1 #1976D2);
+    border-radius: 5px;
+}
+
+/* 状态栏按钮优化 */
+QStatusBar QPushButton {
+    border: 1px solid #2196F3;
+    border-radius: 4px;
+    padding: 4px 12px;
+    background-color: #2196F3;
+    color: white;
+    font-size: 12px;
+    min-height: 24px;
+}
+
+QStatusBar QPushButton:hover {
+    background-color: #1976D2;
+    border-color: #1976D2;
+}
+
+QStatusBar QPushButton:pressed {
+    background-color: #1565C0;
+}
+
+/* ========================================
+   账号切换对话框样式
+   ======================================== */
+
+/* 账号列表容器 */
+QListWidget#accountList {
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    padding: 5px;
+    background-color: white;
+    outline: none;
+    /* 明确禁用交替行颜色 */
+    alternate-background-color: white;
+}
+
+/* 账号列表项 - 偶数行 */
+QListWidget#accountList::item {
+    padding: 12px;
+    border-radius: 3px;
+    font-size: 13px;
+    background-color: white;
+}
+
+/* 账号列表项 - 奇数行（禁用交替颜色，保持白色） */
+QListWidget#accountList::item:alternate {
+    background-color: white;
+}
+
+/* 账号列表项悬停 */
+QListWidget#accountList::item:hover {
+    background-color: #f0f0f0;
+}
+
+/* 账号列表项选中 */
+QListWidget#accountList::item:selected {
+    background-color: #2196F3;
+    color: white;
+}
+
+/* 当前账号（不可选择）- 浅蓝色背景 */
+QListWidget#accountList::item:!selectable {
+    background-color: #C8E6FF;
+    color: #3C5A6E;
+    font-weight: 500;
+}
+
+/* 当前账号悬停保持浅蓝色 */
+QListWidget#accountList::item:!selectable:hover {
+    background-color: #C8E6FF;
+}

@@ -35,18 +35,6 @@ def main():
         window = MainWindow()
         window.show()
 
-
-        # # 检查是否需要直接显示登录对话框
-        # if window.api_client.is_authenticated():
-        #     # 已登录，直接显示主页面
-        #     window.show()
-        #     # 加载缓存并显示文件
-        #     QTimer.singleShot(1000, window.check_cache_and_load)
-        # else:
-        #     # 未登录，显示窗口并自动弹出登录对话框
-        #     window.show()
-        #     QTimer.singleShot(300, window.show_login_dialog)
-
         logger.info('应用程序启动成功')
 
         # 运行应用
