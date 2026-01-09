@@ -32,6 +32,12 @@ class TransferTask:
     uploaded_chunks: List[int] = field(default_factory=list)
     block_list_md5: List[str] = field(default_factory=list)  # 分片MD5列表
 
+    # 分片内进度估算相关
+    slice_progress: float = 0.0  # 当前分片的内进度 (0.0-1.0)
+    slice_start_time: float = 0.0  # 当前分片开始时间
+    avg_slice_speed: float = 0.0  # 平均分片上传速度 (bytes/s)
+    slice_uploading: bool = False  # 是否正在上传分片
+
     # 断点续传相关
     local_path: Optional[str] = None  # 本地文件路径
     uploadid: Optional[str] = None
@@ -59,6 +65,11 @@ class TransferManager:
 
         # 延迟恢复任务（等登录后再恢复）
         self.tasks_loaded = False
+
+        # 启动进度更新线程
+        self.progress_update_running = True
+        self.progress_thread = threading.Thread(target=self._update_slice_progress_loop, daemon=True)
+        self.progress_thread.start()
         
     def _ensure_resume_dir(self):
         """确保断点续传数据目录存在"""
@@ -68,6 +79,52 @@ class TransferManager:
     def set_upload_complete_callback(self, callback):
         """设置上传完成回调函数"""
         self.upload_complete_callback = callback
+
+    def _update_slice_progress_loop(self):
+        """后台线程：定期更新所有正在上传任务的分片内进度"""
+        while self.progress_update_running:
+            try:
+                for task in self.tasks:
+                    # 只处理正在上传分片的任务
+                    if (task.type == 'upload' and
+                        task.status == '分片上传中' and
+                        task.slice_uploading and
+                        task.total_chunks > 0):
+
+                        # 计算已用时间
+                        elapsed = time.time() - task.slice_start_time
+
+                        # 使用平均速度估算进度
+                        if task.avg_slice_speed > 0:
+                            # 估算已上传的字节数
+                            estimated_uploaded = elapsed * task.avg_slice_speed
+                            # 计算当前分片的大小
+                            current_chunk_size = min(
+                                task.chunk_size,
+                                task.size - task.current_chunk * task.chunk_size
+                            )
+                            # 计算分片内进度（限制最大0.99，预留1%给实际完成）
+                            task.slice_progress = min(estimated_uploaded / current_chunk_size, 0.99)
+                        else:
+                            # 第一次上传，没有历史速度，使用线性估算（假设5秒上传完）
+                            current_chunk_size = min(
+                                task.chunk_size,
+                                task.size - task.current_chunk * task.chunk_size
+                            )
+                            estimated_speed = current_chunk_size / 5.0  # 假设5秒上传完
+                            estimated_uploaded = elapsed * estimated_speed
+                            task.slice_progress = min(estimated_uploaded / current_chunk_size, 0.99)
+
+                        # 计算总进度 = 已完成分片 + 当前分片进度
+                        base_progress = task.current_chunk / task.total_chunks
+                        slice_contribution = task.slice_progress / task.total_chunks
+                        task.progress = (base_progress + slice_contribution) * 100
+
+                # 每100ms更新一次
+                time.sleep(0.1)
+            except Exception as e:
+                logger.error(f"更新分片进度时出错: {e}")
+                time.sleep(0.5)  # 出错时等待更长时间
 
     def _notify_upload_complete(self, task):
         """通知上传完成"""
@@ -433,6 +490,12 @@ class TransferManager:
                         task.status = "已暂停"
                         break
 
+                    # ============ 开始分片内进度估算 ============
+                    task.slice_start_time = time.time()
+                    task.slice_uploading = True
+                    task.slice_progress = 0.0
+                    # ==========================================
+
                     # 上传分片（使用同一个 upload_url）
                     start_time = time.time()
                     result = self.api_client.upload_slice(
@@ -447,12 +510,26 @@ class TransferManager:
                     if not result.get('success'):
                         task.status = "失败"
                         task.error_message = f"分片 {chunk_index + 1} 上传失败"
+                        # 停止进度估算
+                        task.slice_uploading = False
+                        task.slice_progress = 0.0
                         break
 
                     # 计算上传速度
                     upload_time = time.time() - start_time
                     if upload_time > 0:
-                        task.speed = len(chunk_data) / upload_time
+                        slice_speed = len(chunk_data) / upload_time
+                        # 更新平均速度（使用加权平均，新速度占20%）
+                        if task.avg_slice_speed > 0:
+                            task.avg_slice_speed = task.avg_slice_speed * 0.8 + slice_speed * 0.2
+                        else:
+                            task.avg_slice_speed = slice_speed
+                        task.speed = task.avg_slice_speed  # 更新显示速度
+
+                    # ============ 停止分片内进度估算 ============
+                    task.slice_uploading = False
+                    task.slice_progress = 1.0  # 标记为完成
+                    # ==========================================
 
                     # 更新进度
                     task.uploaded_chunks.append(chunk_index)

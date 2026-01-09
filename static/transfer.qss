@@ -37,9 +37,10 @@ QLabel#statLabel {
 }
 
 QLabel#speedLabel {
-    font-size: 11px;
-    color: #2196F3;
-    font-weight: 600;
+    font-size: 12px;
+    color: #1976D2;
+    font-weight: bold;
+    padding: 0px 5px;
 }
 
 /* 传输进度条 - 根据状态改变颜色 */

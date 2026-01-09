@@ -685,7 +685,7 @@ class BaiduPanAPI:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
 
-            response = requests.post(url, files=files, headers=headers, timeout=self.timeout)
+            response = requests.post(url, files=files, headers=headers, timeout=APIConstants.UPLOAD_TIMEOUT)
             result = response.json()
 
             # 打印完整的响应以便调试

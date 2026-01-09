@@ -160,7 +160,7 @@ class TransferPage(QWidget):
         """设置定时器更新任务状态"""
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_transfer_table)
-        self.update_timer.start(500)
+        self.update_timer.start(100)
 
     def update_transfer_table(self):
         """更新传输表格"""
@@ -229,23 +229,23 @@ class TransferPage(QWidget):
             if not progress_widget:
                 # 创建新的进度条 widget
                 progress_widget = QWidget()
-                progress_layout = QVBoxLayout(progress_widget)
-                progress_layout.setContentsMargins(5, 3, 5, 3)
-                progress_layout.setSpacing(2)
+                progress_layout = QHBoxLayout(progress_widget)
+                progress_layout.setContentsMargins(5, 2, 5, 2)
+                progress_layout.setSpacing(8)
 
                 # 进度条
                 progress_bar = QProgressBar()
-                progress_bar.setMaximumHeight(18)
-                progress_bar.setMinimumHeight(18)
+                progress_bar.setMaximumHeight(20)
+                progress_bar.setMinimumHeight(20)
                 progress_bar.setTextVisible(True)
                 progress_bar.setObjectName("transferProgress")
-                progress_layout.addWidget(progress_bar)
+                progress_layout.addWidget(progress_bar, 7)  # 占7份空间
 
                 # 速度显示标签
                 speed_label = QLabel()
                 speed_label.setObjectName("speedLabel")
-                speed_label.setAlignment(Qt.AlignCenter)
-                progress_layout.addWidget(speed_label)
+                speed_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                progress_layout.addWidget(speed_label, 3)  # 占3份空间
 
             # 更新进度条值和样式
             progress_layout = progress_widget.layout()
@@ -254,13 +254,24 @@ class TransferPage(QWidget):
 
             # 更新进度值和文本
             progress_bar.setValue(int(task.progress))
-            progress_bar.setFormat(f"{task.progress:.1f}%")
+
+            # 分片上传时显示分片信息
+            if task.status == "分片上传中" and task.total_chunks > 0:
+                progress_bar.setFormat(f"{task.progress:.1f}% ({task.current_chunk + 1}/{task.total_chunks}片)")
+            else:
+                progress_bar.setFormat(f"{task.progress:.1f}%")
+
             progress_bar.setStyleSheet(AppStyles.get_progress_bar_style(task.status))
 
             # 更新速度显示
             if speed_label:
-                if task.speed > 0 and task.status in ["上传中", "下载中", "分片上传中"]:
-                    speed_label.setText(self.format_speed(task.speed))
+                if task.status in ["上传中", "下载中", "分片上传中"]:
+                    # 正在传输时始终显示速度标签
+                    if task.speed > 0:
+                        speed_label.setText(self.format_speed(task.speed))
+                    else:
+                        # 第一个分片上传时速度还未计算，显示省略号
+                        speed_label.setText("...")
                     speed_label.setVisible(True)
                 else:
                     speed_label.setVisible(False)
@@ -356,8 +367,8 @@ class TransferPage(QWidget):
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # 操作：根据内容
 
         # 设置初始列宽
-        table.setColumnWidth(0, 700)  # 任务名称
-        table.setColumnWidth(1, 250)  # 进度
+        table.setColumnWidth(0, 600)  # 任务名称
+        table.setColumnWidth(1, 400)  # 进度（增加宽度以显示速度）
 
         # 设置列的最小宽度
         header.setMinimumSectionSize(100)  # 所有列最小100px
@@ -366,7 +377,35 @@ class TransferPage(QWidget):
         table.setContextMenuPolicy(Qt.CustomContextMenu)
         table.customContextMenuRequested.connect(self.show_transfer_menu)
 
+        # 连接双击事件
+        table.cellDoubleClicked.connect(self.on_table_double_clicked)
+
         return table
+
+    def on_table_double_clicked(self, row: int, column: int):
+        """处理表格双击事件 - 暂停/开始任务"""
+        table = self.sender()
+        if not table:
+            return
+
+        # 获取任务ID
+        task_id_item = table.item(row, 0)
+        if not task_id_item:
+            return
+
+        task_id = task_id_item.data(Qt.UserRole)
+        task = self.transfer_manager.get_task(task_id)
+
+        if not task:
+            return
+
+        # 根据状态决定是暂停还是开始
+        if task.status in ["上传中", "下载中", "分片上传中", "等待中"]:
+            # 正在运行/等待中 -> 暂停
+            self.pause_task(task_id)
+        elif task.status in ["已暂停", "已暂停（可断点续传）"]:
+            # 已暂停 -> 继续
+            self.resume_task(task_id)
 
     def switch_transfer_tab(self, tab_type):
         """切换传输标签页"""

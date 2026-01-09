@@ -10,6 +10,7 @@ from enum import IntEnum
 class APIConstants:
     """API 相关常量"""
     DEFAULT_TIMEOUT = 10  # 默认请求超时时间（秒）
+    UPLOAD_TIMEOUT = 300  # 上传文件超时时间（秒）- 5分钟
     MAX_WORKERS = 5  # 线程池最大工作线程数
     REQUEST_DELAY = 0.2  # 请求间隔延迟（秒）
 
