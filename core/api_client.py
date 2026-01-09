@@ -337,10 +337,32 @@ class BaiduPanAPI:
 
         if result and result.get('errno') == 0:
             file_list = result.get('list', [])
-            return file_list
+            logger.info(f"成功获取文件列表: {len(file_list)} 个项目")
+
+            # 验证返回数据的完整性
+            validated_list = []
+            for idx, file in enumerate(file_list):
+                if isinstance(file, dict):
+                    # 确保必需的字段存在
+                    validated_file = {
+                        'server_filename': file.get('server_filename', '未知文件'),
+                        'path': file.get('path', ''),
+                        'isdir': file.get('isdir', 0),
+                        'fs_id': file.get('fs_id', ''),
+                        'size': file.get('size', 0),
+                        'server_mtime': file.get('server_mtime', 0)
+                    }
+                    validated_list.append(validated_file)
+                else:
+                    logger.warning(f"跳过无效的文件项 (index={idx}): {type(file)}")
+
+            logger.debug(f"验证后的文件列表: {len(validated_list)} 个有效项目")
+            return validated_list
         else:
             if result:
-                logger.error(f"获取文件列表失败: {result.get('errmsg', '未知错误')}")
+                error_msg = result.get('errmsg', '未知错误')
+                errno = result.get('errno', -1)
+                logger.error(f"获取文件列表失败: {error_msg}, errno: {errno}")
             else:
                 logger.error("获取文件列表失败: 请求返回空")
             return []
@@ -937,3 +959,268 @@ class BaiduPanAPI:
         except IOError as e:
             logger.error(f"读取文件失败: {e}")
             return {'success': False, 'error': f'读取文件失败: {e}'}
+
+    # ========== 文件下载相关方法 ==========
+
+    def get_file_info(self, fs_ids: List[str]) -> Dict[str, Any]:
+        """
+        获取文件信息（包含下载链接 dlink）
+
+        Args:
+            fs_ids: 文件ID列表
+
+        Returns:
+            包含文件信息的响应数据，其中包含 dlink 下载链接
+        """
+        # 转换 fs_ids 为整数列表
+        fsids_int = [int(fs_id) for fs_id in fs_ids]
+
+        # 使用 POST 方法，参数放在请求体中
+        url = f"{self.host}/rest/2.0/xpan/file?method=filemetas&access_token={self.access_token}"
+
+        data = {
+            'fsids': json.dumps(fsids_int),
+            'dlink': 1  # 设置为1以获取下载链接
+        }
+
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'pan.baidu.com'
+        }
+
+        logger.info(f"获取文件信息，fs_ids: {fsids_int}")
+
+        try:
+            response = requests.post(url, data=data, headers=headers, timeout=self.timeout)
+            result = response.json()
+
+            logger.debug(f"API 响应: {result}")
+
+            if result.get('errno') == 0:
+                # 百度API返回的数据在 'info' 字段中，不是 'list'
+                file_list = result.get('info', [])
+                if file_list:
+                    logger.info(f"成功获取文件信息，文件数: {len(file_list)}")
+                    return {'success': True, 'data': file_list[0] if len(file_list) == 1 else file_list}
+                else:
+                    logger.error(f"API 返回成功但 info 为空，完整响应: {result}")
+                    return {'success': False, 'error': '未找到文件信息'}
+            else:
+                error_msg = result.get('errmsg', '获取文件信息失败')
+                errno = result.get('errno', -1)
+                logger.error(f"获取文件信息失败: {error_msg}, errno: {errno}, 完整响应: {result}")
+                return {'success': False, 'error': error_msg}
+
+        except requests.RequestException as e:
+            logger.error(f"获取文件信息请求失败: {e}")
+            return {'success': False, 'error': str(e)}
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON解析失败: {e}")
+            return {'success': False, 'error': '响应格式错误'}
+
+    def download_file(self, dlink: str, local_path: str, task=None) -> Dict[str, Any]:
+        """
+        下载文件
+
+        Args:
+            dlink: 文件下载链接
+            local_path: 本地保存路径
+            task: 下载任务对象（用于更新进度）
+
+        Returns:
+            下载结果
+        """
+        import os
+
+        # 确保目录存在
+        local_dir = os.path.dirname(local_path)
+        if local_dir and not os.path.exists(local_dir):
+            os.makedirs(local_dir)
+
+        # 拼接 access_token 到 dlink
+        if 'access_token' not in dlink:
+            separator = '&' if '?' in dlink else '?'
+            download_url = f"{dlink}{separator}access_token={self.access_token}"
+        else:
+            download_url = dlink
+
+        # 必须设置 User-Agent 为 pan.baidu.com
+        headers = {
+            'User-Agent': 'pan.baidu.com'
+        }
+
+        try:
+            logger.info(f"开始下载文件: {local_path}")
+            logger.debug(f"下载链接: {download_url}")
+
+            # 发送下载请求（允许重定向）
+            response = requests.get(
+                download_url,
+                headers=headers,
+                stream=True,
+                timeout=APIConstants.UPLOAD_TIMEOUT,
+                allow_redirects=True
+            )
+            response.raise_for_status()
+
+            # 获取文件大小
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded_size = 0
+            last_update_time = time.time()
+
+            # 写入文件
+            with open(local_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+
+                        # 更新进度（每0.5秒更新一次，避免过于频繁）
+                        current_time = time.time()
+                        if task and current_time - last_update_time >= 0.5:
+                            if total_size > 0:
+                                task.progress = (downloaded_size / total_size) * 100
+                            last_update_time = current_time
+
+            # 更新最终进度
+            if task:
+                task.progress = 100
+
+            logger.info(f"文件下载成功: {local_path}, 大小: {downloaded_size} bytes")
+            return {'success': True, 'local_path': local_path, 'size': downloaded_size}
+
+        except requests.RequestException as e:
+            logger.error(f"文件下载请求失败: {e}")
+            return {'success': False, 'error': str(e)}
+        except IOError as e:
+            logger.error(f"写入文件失败: {e}")
+            return {'success': False, 'error': f'写入文件失败: {e}'}
+
+    def download_file_with_resume(self, dlink: str, local_path: str, task=None) -> Dict[str, Any]:
+        """
+        支持断点续传的文件下载
+
+        Args:
+            dlink: 文件下载链接
+            local_path: 本地保存路径
+            task: 下载任务对象（用于更新进度）
+
+        Returns:
+            下载结果
+        """
+        import os
+
+        # 确保目录存在
+        local_dir = os.path.dirname(local_path)
+        if local_dir and not os.path.exists(local_dir):
+            os.makedirs(local_dir)
+
+        # 拼接 access_token 到 dlink
+        if 'access_token' not in dlink:
+            separator = '&' if '?' in dlink else '?'
+            download_url = f"{dlink}{separator}access_token={self.access_token}"
+        else:
+            download_url = dlink
+
+        # 检查本地文件是否已存在且完整
+        if os.path.exists(local_path):
+            downloaded_size = os.path.getsize(local_path)
+            # 获取远程文件大小（从 Content-Length）
+            try:
+                headers = {
+                    'User-Agent': 'pan.baidu.com'
+                }
+                head_response = requests.head(download_url, headers=headers, timeout=10, allow_redirects=True)
+                if head_response.status_code == 200:
+                    total_size = int(head_response.headers.get('content-length', 0))
+                    # 如果本地文件大小等于远程文件大小，说明已经下载完成
+                    if downloaded_size == total_size and total_size > 0:
+                        logger.info(f"文件已完整下载，跳过: {local_path}, 大小: {downloaded_size} bytes")
+                        if task:
+                            task.progress = 100
+                        return {'success': True, 'local_path': local_path, 'size': downloaded_size}
+            except Exception as e:
+                logger.warning(f"检查文件大小失败，将重新下载: {e}")
+
+        # 必须设置 User-Agent 为 pan.baidu.com
+        headers = {
+            'User-Agent': 'pan.baidu.com'
+        }
+
+        downloaded_size = 0
+
+        # 检查本地文件是否已存在（支持断点续传）
+        if os.path.exists(local_path):
+            downloaded_size = os.path.getsize(local_path)
+            logger.info(f"本地文件已存在，尝试断点续传: {local_path}, 已下载: {downloaded_size} bytes")
+            # 只有当文件大小大于0时才设置 Range 头
+            if downloaded_size > 0:
+                headers['Range'] = f'bytes={downloaded_size}-'
+
+        try:
+            logger.info(f"开始下载文件: {local_path}")
+            logger.debug(f"下载链接: {download_url}")
+
+            # 发送下载请求
+            response = requests.get(
+                download_url,
+                headers=headers,
+                stream=True,
+                timeout=APIConstants.UPLOAD_TIMEOUT,
+                allow_redirects=True
+            )
+            response.raise_for_status()
+
+            # 获取文件总大小
+            # 如果支持断点续传，响应码是 206，content-range 包含总大小
+            # 如果不支持断点续传，响应码是 200，content-length 包含总大小
+            if response.status_code == 206:
+                # Content-Range: bytes 0-1023/2048
+                content_range = response.headers.get('content-range', '')
+                if content_range:
+                    total_size = int(content_range.split('/')[-1])
+                else:
+                    total_size = 0
+            else:
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded_size = 0  # 服务器不支持断点续传，从头开始
+
+            logger.info(f"文件总大小: {total_size} bytes, 已下载: {downloaded_size} bytes")
+
+            # 如果文件已经完整下载，直接返回
+            if downloaded_size >= total_size and total_size > 0:
+                logger.info(f"文件已完整下载: {local_path}")
+                if task:
+                    task.progress = 100
+                return {'success': True, 'local_path': local_path, 'size': downloaded_size}
+
+            last_update_time = time.time()
+
+            # 写入文件（追加模式或覆盖模式）
+            mode = 'ab' if downloaded_size > 0 and response.status_code == 206 else 'wb'
+            with open(local_path, mode) as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+
+                        # 更新进度（每0.5秒更新一次）
+                        current_time = time.time()
+                        if task and current_time - last_update_time >= 0.5:
+                            if total_size > 0:
+                                task.progress = (downloaded_size / total_size) * 100
+                            last_update_time = current_time
+
+            # 更新最终进度
+            if task:
+                task.progress = 100
+
+            logger.info(f"文件下载成功: {local_path}, 大小: {downloaded_size} bytes")
+            return {'success': True, 'local_path': local_path, 'size': downloaded_size}
+
+        except requests.RequestException as e:
+            logger.error(f"文件下载请求失败: {e}")
+            return {'success': False, 'error': str(e)}
+        except IOError as e:
+            logger.error(f"写入文件失败: {e}")
+            return {'success': False, 'error': f'写入文件失败: {e}'}

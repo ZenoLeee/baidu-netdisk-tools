@@ -112,7 +112,7 @@ class TransferPage(QWidget):
         self.test_upload_btn = QPushButton("🧪 测试上传")
         self.test_upload_btn.setObjectName("controlButton")
         self.test_upload_btn.setToolTip("生成测试文件并上传")
-        # 创建菜单
+        # 创建上传菜单
         test_menu = QMenu(self)
         test_menu.addAction("3MB 测试（直接上传）", lambda: self.create_test_upload_file(3))
         test_menu.addAction("5MB 测试（分片上传）", lambda: self.create_test_upload_file(5))
@@ -122,6 +122,17 @@ class TransferPage(QWidget):
         test_menu.addAction("500MB 超大文件测试", lambda: self.create_test_upload_file(500))
         self.test_upload_btn.setMenu(test_menu)
         top_layout.addWidget(self.test_upload_btn)
+
+        # 测试下载按钮（带菜单）
+        self.test_download_btn = QPushButton("📥 测试下载")
+        self.test_download_btn.setObjectName("controlButton")
+        self.test_download_btn.setToolTip("下载测试文件")
+        # 创建下载菜单
+        download_menu = QMenu(self)
+        download_menu.addAction("下载 requirements.txt", lambda: self.test_download_file("/requirements.txt"))
+        download_menu.addAction("下载 test.mp3", lambda: self.test_download_file("/test.mp3"))
+        self.test_download_btn.setMenu(download_menu)
+        top_layout.addWidget(self.test_download_btn)
 
         top_layout.addStretch()
 
@@ -468,6 +479,36 @@ class TransferPage(QWidget):
         self.start_upload_task(task)
         return task
 
+    def add_download_task(self, file_name, remote_path, file_size=0, local_path=None):
+        """添加下载任务"""
+        logger.info(f"添加下载任务: {file_name}")
+        logger.info(f"远程路径: {remote_path}")
+        logger.info(f"保存路径: {local_path}")
+
+        # 添加任务
+        task = self.transfer_manager.add_task(
+            file_name,
+            remote_path,
+            file_size,
+            "download",
+            local_path=local_path
+        )
+
+        if task is None:
+            logger.error(f"添加下载任务失败: {file_name}")
+            return None
+
+        task.status = "等待中"
+
+        # 启动下载任务
+        self.start_download_task(task)
+        return task
+
+    def start_download_task(self, task):
+        """开始下载任务"""
+        if task.status in ["等待中", "已暂停"]:
+            self.transfer_manager.start_download(task)
+
     def start_upload_task(self, task):
         """开始上传任务"""
         if task.status in ["等待中", "已暂停", "已暂停（可断点续传）"]:
@@ -480,8 +521,12 @@ class TransferPage(QWidget):
         started_count = 0
         for task in tasks:
             if task.status in ["等待中", "已暂停", "已暂停（可断点续传）"]:
-                logger.info(f"启动任务: {task.name}, 当前状态: {task.status}")
-                self.start_upload_task(task)
+                logger.info(f"启动任务: {task.name}, 当前状态: {task.status}, 类型: {task.type}")
+                # 根据任务类型选择启动方法
+                if task.type == 'upload':
+                    self.start_upload_task(task)
+                elif task.type == 'download':
+                    self.start_download_task(task)
                 started_count += 1
         logger.info(f"已启动 {started_count} 个任务")
 
@@ -547,7 +592,11 @@ class TransferPage(QWidget):
         """继续任务"""
         task = self.transfer_manager.get_task(task_id)
         if task and task.status in ["已暂停", "已暂停（可断点续传）", "等待中"]:
-            self.start_upload_task(task)
+            # 根据任务类型选择启动方法
+            if task.type == 'upload':
+                self.start_upload_task(task)
+            elif task.type == 'download':
+                self.start_download_task(task)
 
     def cancel_task(self, task_id):
         """取消任务"""
@@ -604,3 +653,75 @@ class TransferPage(QWidget):
         except Exception as e:
             logger.error(f"创建测试文件失败: {e}")
             QMessageBox.warning(self, "错误", f"创建测试文件失败: {str(e)}")
+
+    def test_download_file(self, remote_path):
+        """测试下载文件
+
+        Args:
+            remote_path: 远程文件路径
+        """
+        from utils.config_manager import ConfigManager
+
+        # 检查是否有api_client
+        if not self.parent_window or not self.parent_window.api_client:
+            QMessageBox.warning(self, "提示", "请先登录百度网盘账号")
+            return
+
+        # 从路径中提取文件名
+        file_name = os.path.basename(remote_path)
+
+        # 获取默认下载路径（从配置中读取）
+        config = ConfigManager()
+        default_download_dir = config.get_default_download_path()
+
+        logger.info(f"=" * 50)
+        logger.info(f"测试下载: {file_name}")
+        logger.info(f"配置的默认下载目录: {default_download_dir}")
+
+        # 确保目录存在
+        if not os.path.exists(default_download_dir):
+            try:
+                os.makedirs(default_download_dir)
+                logger.info(f"创建默认下载目录: {default_download_dir}")
+            except Exception as e:
+                logger.error(f"创建下载目录失败: {e}")
+                QMessageBox.warning(self, "错误", f"创建下载目录失败: {str(e)}")
+                return
+
+        # 直接使用原文件名保存
+        save_path = os.path.join(default_download_dir, file_name)
+
+        # 如果文件已存在，添加数字后缀避免覆盖
+        if os.path.exists(save_path):
+            base_name, ext = os.path.splitext(file_name)
+            counter = 1
+            while os.path.exists(save_path):
+                new_name = f"{base_name}_{counter}{ext}"
+                save_path = os.path.join(default_download_dir, new_name)
+                counter += 1
+            logger.info(f"文件已存在，使用新名称: {os.path.basename(save_path)}")
+
+        logger.info(f"最终保存路径: {save_path}")
+        logger.info(f"=" * 50)
+
+        try:
+            # 添加下载任务
+            task = self.add_download_task(file_name, remote_path, 0, save_path)
+
+            if task:
+                logger.info(f"✅ 测试下载任务已创建")
+                # 显示完整的保存路径到状态栏
+                full_message = f"已添加下载任务: {file_name} → {save_path}"
+                if self.parent_window and hasattr(self.parent_window, 'status_label'):
+                    self.parent_window.status_label.setText(full_message)
+                    # 10秒后恢复
+                    QTimer.singleShot(10000, lambda: self.parent_window.status_label.setText("就绪"))
+            else:
+                logger.error(f"❌ 添加下载任务失败")
+                QMessageBox.warning(self, "错误", "添加下载任务失败")
+
+        except Exception as e:
+            logger.error(f"测试下载失败: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "错误", f"测试下载失败: {str(e)}")

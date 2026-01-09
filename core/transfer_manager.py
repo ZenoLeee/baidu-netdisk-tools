@@ -223,6 +223,10 @@ class TransferManager:
 
     def add_task(self, name: str, remote_path: str, size: int, task_type: str, local_path: Optional[str] = None) -> Optional[TransferTask]:
         """添加传输任务"""
+        # 初始化变量（确保在所有分支中都有定义）
+        chunk_size = 0
+        total_chunks = 0
+
         # 如果是上传任务，根据会员类型设置分片大小
         if task_type == 'upload':
             # 获取会员类型
@@ -254,7 +258,7 @@ class TransferManager:
             local_path=local_path
         )
 
-        # 设置分片信息
+        # 设置分片信息（仅用于上传任务）
         if task_type == 'upload' and chunk_size > 0:
             task.chunk_size = chunk_size
             task.total_chunks = total_chunks
@@ -264,6 +268,9 @@ class TransferManager:
             task.chunk_size = 0
             task.total_chunks = 0
             logger.info(f"文件直接上传: {name}, 大小: {size}")
+        elif task_type == 'download':
+            # 下载任务不需要分片信息
+            logger.info(f"文件下载: {name}, 大小: {size}")
 
         self.tasks.append(task)
 
@@ -299,6 +306,113 @@ class TransferManager:
             thread = threading.Thread(target=self._upload_simple, args=(task,))
         thread.daemon = True
         thread.start()
+
+    def start_download(self, task: TransferTask):
+        """开始下载任务"""
+        # 确保使用新的 stop_event（避免之前暂停的状态残留）
+        task.stop_event = Event()
+        thread = threading.Thread(target=self._download_file, args=(task,))
+        thread.daemon = True
+        thread.start()
+
+    def _download_file(self, task: TransferTask):
+        """执行下载任务"""
+        try:
+            task.status = "下载中"
+            logger.info(f"开始下载任务: {task.name}")
+            logger.info(f"远程路径: {task.remote_path}")
+            logger.info(f"保存路径: {task.local_path}")
+
+            # 从 remote_path 中提取文件路径
+            # remote_path 应该是完整的文件路径（如 /apps/云端文件.txt）
+            remote_file_path = task.remote_path
+
+            # 首先需要获取文件的 fs_id
+            # 通过 list_files 获取文件列表，找到对应的 fs_id
+            # 这里假设 remote_path 是完整路径，我们需要获取其父目录
+            parent_dir = os.path.dirname(remote_file_path)
+            file_name = os.path.basename(remote_file_path)
+
+            # 列出父目录的文件
+            file_list = self.api_client.list_files(parent_dir if parent_dir else '/')
+
+            # 查找目标文件的 fs_id
+            fs_id = None
+            file_size = 0
+            for file_info in file_list:
+                if file_info.get('path') == remote_file_path or file_info.get('server_filename') == file_name:
+                    fs_id = str(file_info.get('fs_id', ''))
+                    file_size = file_info.get('size', 0)
+                    logger.info(f"找到文件: {file_name}, fs_id: {fs_id}, 大小: {file_size}")
+                    break
+
+            if not fs_id:
+                task.status = "失败"
+                task.error_message = "未找到文件"
+                logger.error(f"未找到文件: {remote_file_path}")
+                return
+
+            # 更新文件大小（如果之前没有设置）
+            if task.size == 0:
+                task.size = file_size
+
+            # 获取文件信息（包含 dlink）
+            file_info_result = self.api_client.get_file_info([fs_id])
+            if not file_info_result.get('success'):
+                task.status = "失败"
+                task.error_message = file_info_result.get('error', '获取文件信息失败')
+                logger.error(f"获取文件信息失败: {task.error_message}")
+                return
+
+            file_data = file_info_result.get('data')
+            dlink = file_data.get('dlink')
+            if not dlink:
+                task.status = "失败"
+                task.error_message = "未获取到下载链接"
+                logger.error("未获取到下载链接 (dlink)")
+                return
+
+            logger.info(f"获取到下载链接: {dlink[:50]}...")
+
+            # 确定本地保存路径
+            if not task.local_path:
+                # 如果没有指定本地路径，使用当前目录
+                task.local_path = os.path.join(os.getcwd(), file_name)
+
+            # 使用支持断点续传的下载方法
+            download_result = self.api_client.download_file_with_resume(
+                dlink,
+                task.local_path,
+                task
+            )
+
+            if download_result.get('success'):
+                task.status = "完成"
+                task.progress = 100
+                task.speed = 0
+                logger.info(f"✅ 文件下载成功: {task.name}, 保存到: {task.local_path}")
+                # 确保文件确实存在
+                if os.path.exists(task.local_path):
+                    actual_size = os.path.getsize(task.local_path)
+                    logger.info(f"✅ 文件已确认存在，大小: {actual_size} bytes")
+                else:
+                    logger.warning(f"⚠️ 下载显示成功但文件不存在: {task.local_path}")
+            else:
+                # 检查是否是暂停
+                error_message = download_result.get('error', '下载失败')
+                if "暂停" in error_message or task.stop_event.is_set():
+                    task.status = "已暂停"
+                    task.error_message = None
+                    logger.info(f"文件下载已暂停: {task.name}")
+                else:
+                    task.status = "失败"
+                    task.error_message = error_message
+                    logger.error(f"文件下载失败: {task.name}, 错误: {task.error_message}")
+
+        except Exception as e:
+            task.status = "失败"
+            task.error_message = str(e)
+            logger.error(f"下载异常: {task.name}, 错误: {e}")
     
     def _upload_simple(self, task: TransferTask):
         """小文件直接上传（≤ 4MB）"""
@@ -689,7 +803,11 @@ class TransferManager:
         if task and task.status in ["已暂停", "已暂停（可断点续传）", "等待中"]:
             # 创建新的 stop_event，确保是未设置状态
             task.stop_event = Event()
-            self.start_upload(task)
+            # 根据任务类型选择恢复方法
+            if task.type == 'upload':
+                self.start_upload(task)
+            elif task.type == 'download':
+                self.start_download(task)
             logger.info(f"任务 {task.name} 已继续")
     
     def cancel_task(self, task_id: int):

@@ -13,12 +13,15 @@ logger = get_logger(__name__)
 
 
 # 默认配置常量
+import os
+
 DEFAULT_CONFIG = {
     'client_id': 'mu79W8Z84iu8eV6cUvru2ckcGtsz5bxL',
     'client_secret': 'K0AVQhS6RyWg2ZNCo4gzdGSftAa4BjIE',
     'redirect_uri': 'http://8.138.162.11:8939/',
     'accounts': {},
     'current_account': None,
+    'default_download_path': os.path.join(os.path.expanduser("~"), "Downloads"),  # 默认下载路径改为 Downloads 文件夹
 }
 
 
@@ -269,3 +272,24 @@ class ConfigManager:
             return account_name
 
         return None
+
+    # 下载路径管理方法
+    def get_default_download_path(self) -> str:
+        """获取默认下载路径
+
+        Returns:
+            默认下载路径
+        """
+        return self.get('default_download_path', os.path.join(os.path.expanduser("~"), "Downloads"))
+
+    def set_default_download_path(self, path: str) -> bool:
+        """设置默认下载路径
+
+        Args:
+            path: 下载路径
+
+        Returns:
+            设置是否成功
+        """
+        self.set('default_download_path', path)
+        return self.save()

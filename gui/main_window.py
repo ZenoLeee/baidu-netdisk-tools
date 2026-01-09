@@ -682,6 +682,8 @@ class MainWindow(QMainWindow):
 
     def download_selected_file(self):
         """下载选中的文件"""
+        from utils.config_manager import ConfigManager
+
         # 检查是否正在加载文件或切换账号
         if self.is_loading_files or self.is_switching_account:
             return
@@ -711,15 +713,48 @@ class MainWindow(QMainWindow):
         size_text = size_item.text() if size_item else "0"
         size = self.parse_size(size_text)
 
-        # 添加下载任务
+        # 获取文件名
+        file_name = name_item.text()
+
+        # 获取默认下载路径
+        config = ConfigManager()
+        default_download_dir = config.get_default_download_path()
+
+        # 确保目录存在
+        if not os.path.exists(default_download_dir):
+            try:
+                os.makedirs(default_download_dir)
+                logger.info(f"创建默认下载目录: {default_download_dir}")
+            except Exception as e:
+                logger.error(f"创建下载目录失败: {e}")
+                QMessageBox.warning(self, "错误", f"创建下载目录失败: {str(e)}")
+                return
+
+        # 构建保存路径
+        save_path = os.path.join(default_download_dir, file_name)
+
+        # 如果文件已存在，添加数字后缀避免覆盖
+        if os.path.exists(save_path):
+            base_name, ext = os.path.splitext(file_name)
+            counter = 1
+            while os.path.exists(save_path):
+                new_name = f"{base_name}_{counter}{ext}"
+                save_path = os.path.join(default_download_dir, new_name)
+                counter += 1
+            logger.info(f"文件已存在，使用新名称: {os.path.basename(save_path)}")
+
+        logger.info(f"文件管理下载按钮: {file_name} -> {save_path}")
+
+        # 添加下载任务（指定保存路径）
         task = self.transfer_page.add_download_task(
-            name_item.text(),
+            file_name,
             data['path'],
-            size
+            size,
+            save_path
         )
 
         # 显示通知
-        self.status_label.setText(f"已添加下载任务: {name_item.text()}")
+        self.status_label.setText(f"已添加下载任务: {file_name}")
 
     @staticmethod
     def parse_size(size_str):
@@ -1563,6 +1598,12 @@ class MainWindow(QMainWindow):
 
     def download_file(self, item, path):
         """下载文件"""
+        from utils.config_manager import ConfigManager
+
+        logger.info(f"=" * 50)
+        logger.info(f"download_file 方法被调用")
+        logger.info(f"文件名: {item.text()}, 路径: {path}")
+
         data = item.data(Qt.UserRole)
         if not data:
             return
@@ -1571,12 +1612,49 @@ class MainWindow(QMainWindow):
         size_text = size_item.text() if size_item else "0"
         size = self.parse_size(size_text)
 
-        task = self.transfer_page.add_download_task(item.text(), path, size)
+        # 获取文件名
+        file_name = item.text()
+
+        # 获取默认下载路径
+        config = ConfigManager()
+        default_download_dir = config.get_default_download_path()
+
+        logger.info(f"配置的默认下载目录: {default_download_dir}")
+
+        # 确保目录存在
+        if not os.path.exists(default_download_dir):
+            try:
+                os.makedirs(default_download_dir)
+                logger.info(f"创建默认下载目录: {default_download_dir}")
+            except Exception as e:
+                logger.error(f"创建下载目录失败: {e}")
+                QMessageBox.warning(self, "错误", f"创建下载目录失败: {str(e)}")
+                return
+
+        # 构建保存路径
+        save_path = os.path.join(default_download_dir, file_name)
+
+        # 如果文件已存在，添加数字后缀避免覆盖
+        if os.path.exists(save_path):
+            base_name, ext = os.path.splitext(file_name)
+            counter = 1
+            while os.path.exists(save_path):
+                new_name = f"{base_name}_{counter}{ext}"
+                save_path = os.path.join(default_download_dir, new_name)
+                counter += 1
+            logger.info(f"文件已存在，使用新名称: {os.path.basename(save_path)}")
+
+        logger.info(f"最终保存路径: {save_path}")
+        logger.info(f"调用 add_download_task: file_name={file_name}, path={path}, size={size}, save_path={save_path}")
+        logger.info(f"=" * 50)
+
+        # 添加下载任务（指定保存路径）
+        task = self.transfer_page.add_download_task(file_name, path, size, save_path)
 
         item_obj = self.file_table.item(item.row(), item.column())
         rect = self.file_table.visualItemRect(item_obj)
         global_pos = self.file_table.viewport().mapToGlobal(rect.topLeft())
-        QTimer.singleShot(100, lambda: self.show_tooltip(global_pos, f"已添加下载任务: {item.text()}", self, rect))
+        QTimer.singleShot(100, lambda: self.show_tooltip(global_pos, f"已添加下载任务: {file_name}", self, rect))
 
     def get_file_type_icon(self, filename, is_dir=False):
         """根据文件名和类型获取对应的图标"""
@@ -1615,63 +1693,107 @@ class MainWindow(QMainWindow):
     def set_list_items(self, files):
         self.file_table.setRowCount(len(files))
         for row, file in enumerate(files):
-            name_item = QTableWidgetItem(file['server_filename'])
-            name_item.setData(Qt.UserRole, {'path': file['path'], 'is_dir': file['isdir'], 'fs_id': file['fs_id']})
+            try:
+                # 安全获取文件名，如果不存在则使用默认值
+                server_filename = file.get('server_filename', '未知文件')
+                name_item = QTableWidgetItem(server_filename)
 
-            tooltip_text = f"路径: {file['path']}"
-            if not file['isdir']:
+                # 安全获取路径和目录标识
+                path = file.get('path', '')
+                isdir = file.get('isdir', 0)
+                fs_id = file.get('fs_id', '')
+
+                name_item.setData(Qt.UserRole, {'path': path, 'is_dir': isdir, 'fs_id': fs_id})
+
+                tooltip_text = f"路径: {path}"
+                if not isdir:
+                    size = file.get('size', 0)
+                    tooltip_text += f"\n大小: {FileUtils.format_size(size)}"
+                name_item.setData(Qt.UserRole + 1, tooltip_text)
+
+                # 设置文件类型图标
+                icon = self.get_file_type_icon(server_filename, isdir)
+                name_item.setIcon(icon)
+
+                self.file_table.setItem(row, 0, name_item)
+
                 size = file.get('size', 0)
-                tooltip_text += f"\n大小: {FileUtils.format_size(size)}"
-            name_item.setData(Qt.UserRole + 1, tooltip_text)
+                size_str = FileUtils.format_size(size) if not isdir else ""
+                self.file_table.setItem(row, 1, QTableWidgetItem(size_str))
 
-            # 设置文件类型图标
-            icon = self.get_file_type_icon(file['server_filename'], file['isdir'])
-            name_item.setIcon(icon)
+                mtime = file.get('server_mtime', 0)
+                time_str = FileUtils.format_time(mtime)
+                self.file_table.setItem(row, 2, QTableWidgetItem(time_str))
 
-            self.file_table.setItem(row, 0, name_item)
-
-            size = file.get('size', 0)
-            size_str = FileUtils.format_size(size) if not file['isdir'] else ""
-            self.file_table.setItem(row, 1, QTableWidgetItem(size_str))
-
-            mtime = file.get('server_mtime', 0)
-            time_str = FileUtils.format_time(mtime)
-            self.file_table.setItem(row, 2, QTableWidgetItem(time_str))
+            except Exception as e:
+                logger.error(f"设置文件列表项失败 (row={row}, file={file}): {e}")
+                import traceback
+                traceback.print_exc()
+                # 即使出错也继续处理其他项
+                continue
 
     def on_table_double_clicked(self, row):
-        item = self.file_table.item(row, 0)
-        data = item.data(Qt.UserRole)
+        try:
+            item = self.file_table.item(row, 0)
+            if not item:
+                logger.warning(f"双击了无效的行: {row}")
+                return
 
-        # 如果没有 data，说明可能是新建文件夹还未刷新，忽略
-        if not data:
-            return
+            data = item.data(Qt.UserRole)
 
-        if not data['is_dir']:
-            # 如果是文件，可以下载
-            self.download_file(item, data['path'])
-            return
+            # 如果没有 data，说明可能是新建文件夹还未刷新，忽略
+            if not data:
+                logger.warning(f"双击的项没有数据: row={row}")
+                return
 
-        path = data['path']
+            if not isinstance(data, dict):
+                logger.warning(f"数据格式错误: row={row}, data type={type(data)}")
+                return
 
-        if self.current_worker and self.current_worker.isRunning():
-            self.current_worker.stop()
-            self.current_worker.wait()
+            is_dir = data.get('is_dir', 0)
 
-        # 设置加载标志
-        self.is_loading_files = True
+            if not is_dir:
+                # 如果是文件，可以下载
+                path = data.get('path', '')
+                if path:
+                    self.download_file(item, path)
+                else:
+                    logger.warning(f"文件路径为空: row={row}")
+                return
 
-        self.current_path = path
-        self.file_table.setEnabled(False)
-        self.show_status_progress(f"正在加载: {path}")
-        self.update_breadcrumb(path)
+            path = data.get('path', '')
+            if not path:
+                logger.warning(f"文件夹路径为空: row={row}")
+                return
 
-        self.current_worker = Worker(
-            func=self.api_client.list_files,
-            path=path
-        )
-        self.current_worker.finished.connect(self.on_directory_success)
-        self.current_worker.error.connect(self.on_directory_load_error)
-        self.current_worker.start()
+            if self.current_worker and self.current_worker.isRunning():
+                self.current_worker.stop()
+                self.current_worker.wait()
+
+            # 设置加载标志
+            self.is_loading_files = True
+
+            self.current_path = path
+            self.file_table.setEnabled(False)
+            self.show_status_progress(f"正在加载: {path}")
+            self.update_breadcrumb(path)
+
+            self.current_worker = Worker(
+                func=self.api_client.list_files,
+                path=path
+            )
+            self.current_worker.finished.connect(self.on_directory_success)
+            self.current_worker.error.connect(self.on_directory_load_error)
+            self.current_worker.start()
+
+        except Exception as e:
+            logger.error(f"双击处理失败: row={row}, error={e}")
+            import traceback
+            traceback.print_exc()
+            # 恢复界面状态
+            self.is_loading_files = False
+            self.file_table.setEnabled(True)
+            self.hide_status_progress()
 
     def on_directory_success(self, result):
         """目录加载成功回调"""
