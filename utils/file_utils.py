@@ -304,7 +304,7 @@ class FileUtils:
             'videos': '🎬',
             'documents': '📄',
             'audio': '🎵',
-            'archives': '📦',
+            'archives': '🗜️',  # 压缩文件图标
             'code': '💻',
             'executable': '⚙️',
             'other': '📎'

@@ -1,0 +1,68 @@
+/* ========================================
+   标签和其他组件样式
+   ======================================== */
+
+/* 位置标签 */
+QLabel#locationLabel {
+    color: #666;
+    font-size: 12px;
+    padding: 0px 2px 0px 0px;
+    margin: 0px;
+}
+
+/* 当前路径标签样式 - 不可点击 */
+QLabel#breadcrumbCurrent {
+    color: #333;
+    font-size: 12px;
+    padding: 0px 2px;
+    margin: 0px;
+    font-weight: bold;
+}
+
+/* 面包屑分隔符样式 - 紧凑 */
+QLabel#breadcrumbSeparator {
+    color: #999;
+    font-size: 11px;
+    padding: 0px 2px;
+    margin: 0px;
+}
+
+/* 用户信息 */
+QLabel#user {
+    font-size: 13px;
+    color: #333;
+    font-weight: 500;
+    padding: 4px 8px;
+    background-color: #f5f5f5;
+    border-radius: 4px;
+}
+
+/* 工具提示标签 */
+QLabel#tooltipLabel {
+    background-color: #FFF3CD;
+    border: 1px solid #FFC107;
+    border-radius: 4px;
+    padding: 8px 12px;
+    color: #856404;
+}
+
+/* 对话框标题标签 */
+QLabel#dialogTitle {
+    font-size: 16px;
+    font-weight: bold;
+    padding: 5px;
+}
+
+/* 传输操作标签 */
+QLabel#actionLabel {
+    font-size: 14px;
+    cursor: pointer;
+}
+
+QLabel#actionLabel:hover {
+    opacity: 0.8;
+}
+
+QLabel#actionLabel.danger {
+    color: #f44336;
+}

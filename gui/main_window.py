@@ -2,14 +2,15 @@
 主窗口 - 集成文件管理和传输页面
 """
 import os
+import time
 from typing import Optional
 
 from PyQt5.QtWidgets import (
     QMainWindow, QApplication, QWidget, QVBoxLayout, QStackedWidget,
     QHBoxLayout, QLabel, QPushButton, QAbstractItemView, QSizePolicy,
     QHeaderView, QShortcut, QFrame, QMenu, QMessageBox, QTableWidgetItem,
-    QToolTip, QDialog, QStatusBar, QProgressBar, QAction, QFileDialog,
-    QInputDialog, QLineEdit, QProgressDialog, QListWidget, QListWidgetItem, QStyle
+    QDialog, QStatusBar, QProgressBar, QAction, QFileDialog,
+    QInputDialog, QLineEdit, QProgressDialog, QListWidget, QListWidgetItem, QStyle, QToolTip
 )
 from PyQt5.QtCore import (
     Qt, QTimer, QPoint, QRect
@@ -120,8 +121,33 @@ class MainWindow(QMainWindow):
     def complete_auto_login(self):
         """完成自动登录后的处理"""
         try:
+            # 同步 token 到 transfer_manager（自动登录时也需要同步）
+            if self.api_client.access_token:
+                self.transfer_manager.api_client.access_token = self.api_client.access_token
+                self.transfer_manager.api_client.current_account = self.api_client.current_account
+                logger.info("自动登录：已同步 token 到 transfer_manager")
+
             # 更新用户信息
             self.update_user_info()
+
+            # 设置用户UK到 transfer_manager
+            try:
+                user_info = self.api_client.get_user_info()
+                if user_info:
+                    uk = user_info.get('uk')
+                    if uk:
+                        self.transfer_manager.set_user_uk(uk)
+                        logger.info(f"自动登录：设置用户UK成功: {uk}")
+                    else:
+                        logger.warning("自动登录：用户信息中未找到UK字段")
+                else:
+                    logger.warning("自动登录：获取用户信息失败")
+            except Exception as e:
+                logger.error(f"自动登录：获取或设置用户UK失败: {e}")
+
+            # 恢复未完成的任务
+            logger.info("自动登录：开始恢复未完成的任务...")
+            self.transfer_manager.resume_incomplete_tasks()
 
             # 获取根目录
             result = self.get_list_files()
@@ -344,6 +370,7 @@ class MainWindow(QMainWindow):
         self.file_table.verticalHeader().setDefaultSectionSize(UIConstants.TABLE_ROW_HEIGHT)
         self.file_table.verticalHeader().setVisible(False)  # 隐藏行号
         self.file_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.file_table.setSelectionMode(QAbstractItemView.ExtendedSelection)  # 扩展选择（默认单选，Ctrl/Shift多选）
         self.file_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # 连接拖拽信号
@@ -361,8 +388,15 @@ class MainWindow(QMainWindow):
         self.file_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_table.customContextMenuRequested.connect(self.show_file_table_menu)
 
+        # 安装事件过滤器以禁用拖动选择
+        self.file_table.viewport().installEventFilter(self)
+        self._drag_start_pos = None
+
         # 监听文件列表项改变
         self.file_table.itemChanged.connect(self.on_item_changed)
+
+        # 监听当前项改变（用于检测新建文件夹失去焦点）
+        self.file_table.currentItemChanged.connect(self.on_current_item_changed)
 
         # 添加快捷键
         QShortcut(QKeySequence("F5"), self.file_table).activated.connect(lambda: self.update_items(self.current_path))
@@ -395,6 +429,9 @@ class MainWindow(QMainWindow):
         """设置传输页面"""
         self.transfer_page = TransferPage(self)
         self.stacked_widget.addWidget(self.transfer_page)
+
+        # 设置上传完成回调，自动刷新文件列表
+        self.transfer_page.transfer_manager.set_upload_complete_callback(self.on_upload_complete)
 
     # 登录页面
     def setup_login_page(self):
@@ -493,12 +530,11 @@ class MainWindow(QMainWindow):
                     # 大文件，需要分片上传并显示断点续传状态
                     total_chunks = (file_size + UploadConstants.CHUNK_SIZE - 1) // UploadConstants.CHUNK_SIZE
 
-                    # 添加上传任务（自动启用分片上传）
+                    # 添加上传任务（自动启用分片上传和断点续传）
                     task = self.transfer_page.add_upload_task(
                         file_path,
                         self.current_path,
-                        chunk_size=UploadConstants.CHUNK_SIZE,
-                        enable_resume=True  # 启用断点续传
+                        enable_resume=True
                     )
 
                     if task:
@@ -596,6 +632,60 @@ class MainWindow(QMainWindow):
         if self.is_loading_files or self.is_switching_account:
             return
 
+    def on_upload_complete(self, task):
+        """上传完成回调"""
+        logger.info(f"上传完成回调: {task.name}, 路径: {task.remote_path}")
+
+        # 如果上传路径是当前路径，直接在表格中添加 item
+        if task.remote_path == self.current_path:
+            logger.info(f"上传完成，添加文件到表格: {task.name}")
+
+            # 在表格末尾添加一行
+            row_count = self.file_table.rowCount()
+            self.file_table.insertRow(row_count)
+
+            # 构造文件完整路径
+            full_path = f"{task.remote_path.rstrip('/')}/{task.name}"
+
+            # 名称列
+            name_item = QTableWidgetItem(task.name)
+            file_data = {
+                'path': full_path,
+                'is_dir': False,
+                'fs_id': int(time.time() * 1000)  # 使用时间戳作为临时 fs_id
+            }
+            name_item.setData(Qt.UserRole, file_data)
+
+            tooltip_text = f"路径: {full_path}\n大小: {FileUtils.format_size(task.size)}"
+            name_item.setData(Qt.UserRole + 1, tooltip_text)
+
+            # 设置文件类型图标
+            icon = self.get_file_type_icon(task.name, is_dir=False)
+            name_item.setIcon(icon)
+
+            self.file_table.setItem(row_count, 0, name_item)
+
+            # 大小列
+            size_str = FileUtils.format_size(task.size)
+            self.file_table.setItem(row_count, 1, QTableWidgetItem(size_str))
+
+            # 时间列（使用当前时间）
+            time_str = FileUtils.format_time(int(time.time()))
+            self.file_table.setItem(row_count, 2, QTableWidgetItem(time_str))
+
+            # 显示通知
+            self.status_label.setText(f"文件上传完成: {task.name}")
+        else:
+            # 如果不在当前路径，也显示通知
+            logger.info(f"文件上传到其他路径: {task.remote_path}")
+            self.status_label.setText(f"文件上传完成: {task.name} -> {task.remote_path}")
+
+    def download_selected_file(self):
+        """下载选中的文件"""
+        # 检查是否正在加载文件或切换账号
+        if self.is_loading_files or self.is_switching_account:
+            return
+
         selected_items = self.file_table.selectedItems()
         if not selected_items:
             QMessageBox.warning(self, "提示", "请先选择一个文件")
@@ -665,7 +755,7 @@ class MainWindow(QMainWindow):
         # 检查第一行是否是空的编辑项（可能是上次未完成的）
         if self.file_table.rowCount() > 0:
             first_item = self.file_table.item(0, 0)
-            if first_item and not first_item.text():
+            if first_item and not first_item.text() and not first_item.data(Qt.UserRole):
                 logger.info("清理第一行的空项")
                 self.file_table.removeRow(0)
 
@@ -681,14 +771,365 @@ class MainWindow(QMainWindow):
         # 设置为空字符串，用户可以直接输入
         icon_item.setText("")
 
+        # 保存原始文本，用于判断是否真的有输入
+        self._original_folder_text = ""
+
         # 选中该行并开始编辑
         self.file_table.selectRow(0)
         self.file_table.editItem(icon_item)
 
         # 标记为新建文件夹状态，on_item_changed 会处理
         self.creating_folder = True
+        self._temp_folder_row = 0
+        self._temp_edit_item = icon_item
+
+        # 安装事件过滤器以监听按键
+        self.file_table.installEventFilter(self)
+        # 同时安装到应用程序，捕获全局事件
+        QApplication.instance().installEventFilter(self)
 
         logger.info("开始创建新文件夹")
+
+    def _cleanup_folder_creation(self):
+        """清理新建文件夹相关的状态"""
+        self.creating_folder = False
+        self._temp_folder_row = None
+        self._temp_edit_item = None
+        self._original_folder_text = None
+        # 移除事件过滤器
+        try:
+            self.file_table.removeEventFilter(self)
+            QApplication.instance().removeEventFilter(self)
+        except:
+            pass
+
+    def _hide_tooltip(self):
+        """隐藏泡泡提醒"""
+        if hasattr(self, '_tooltip_label') and self._tooltip_label:
+            self._tooltip_label.close()
+            self._tooltip_label = None
+
+    def _show_empty_name_tooltip(self):
+        """显示文件夹名称为空的泡泡提醒"""
+        # 如果有之前的tooltip，先删除
+        if hasattr(self, '_tooltip_label') and self._tooltip_label:
+            self._tooltip_label.close()
+            self._tooltip_label = None
+
+        # 创建一个浮动标签作为提示框
+        self._tooltip_label = QLabel("⚠️ 文件夹名称不能为空", self)
+        self._tooltip_label.setObjectName("tooltipLabel")
+        self._tooltip_label.setStyleSheet(AppStyles.get_stylesheet())
+        self._tooltip_label.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint)
+        self._tooltip_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        # 定位在第1行（临时item的下一行）的位置
+        if self.file_table.rowCount() > 1:
+            # 如果有第1行，定位到第1行的位置
+            item_rect = self.file_table.visualItemRect(self.file_table.item(1, 0))
+            local_pos = item_rect.topLeft()
+            global_pos = self.file_table.mapToGlobal(local_pos)
+            self._tooltip_label.move(global_pos)
+        elif self.file_table.rowCount() > 0:
+            # 只有临时item，定位到临时item下方
+            item_rect = self.file_table.visualItemRect(self.file_table.item(0, 0))
+            local_pos = item_rect.bottomLeft()
+            global_pos = self.file_table.mapToGlobal(local_pos)
+            self._tooltip_label.move(global_pos)
+
+        self._tooltip_label.show()
+
+        # 3秒后自动隐藏并删除
+        QTimer.singleShot(3000, self._hide_tooltip)
+
+    def _finalize_folder_creation(self, folder_name: str):
+        """完成文件夹创建（用户已输入文件夹名）"""
+        # 防止重复创建：检查是否已经处理过了
+        if not getattr(self, '_temp_edit_item', None):
+            logger.info("临时item已被处理，跳过重复创建")
+            return
+
+        # 验证文件夹名
+        if not self._is_valid_folder_name(folder_name):
+            QMessageBox.warning(self, "名称非法", "文件夹名称包含非法字符或格式不正确")
+            self.creating_folder = False
+            self.file_table.removeRow(0)
+            self._cleanup_folder_creation()
+            return
+
+        # 构建完整路径
+        if self.current_path == "/":
+            full_path = f"/{folder_name}"
+        else:
+            full_path = f"{self.current_path.rstrip('/')}/{folder_name}"
+
+        logger.info(f"开始创建文件夹: {full_path}")
+
+        # 临时禁用表格
+        self.file_table.setEnabled(False)
+        self.show_status_progress("正在创建文件夹...")
+
+        # 在后台线程中创建
+        from PyQt5.QtCore import QThreadPool, QRunnable
+        import time
+
+        class CreateFolderTask(QRunnable):
+            def __init__(self, api_client, path, callback):
+                super().__init__()
+                self.api_client = api_client
+                self.path = path
+                self.callback = callback
+
+            def run(self):
+                result = self.api_client.create_folder(self.path)
+                self.callback(result)
+
+        def on_create_complete(result):
+            self.hide_status_progress()
+            self.file_table.setEnabled(True)
+
+            if result:
+                logger.info(f"文件夹创建成功: {folder_name}")
+                self.status_label.setText(f"文件夹 '{folder_name}' 创建成功")
+
+                # 更新第一行的item为正常文件夹项
+                if self.file_table.rowCount() > 0:
+                    first_item = self.file_table.item(0, 0)
+                    if first_item and not first_item.data(Qt.UserRole):
+                        logger.info("更新第一行item为正常文件夹项")
+
+                        folder_data = {
+                            'path': full_path,
+                            'isdir': True,
+                            'fs_id': int(time.time() * 1000),
+                            'server_filename': folder_name,
+                            'size': 0,
+                            'server_mtime': int(time.time())
+                        }
+
+                        first_item.setText(folder_name)
+                        first_item.setIcon(self.style().standardIcon(QStyle.SP_DirIcon))
+                        first_item.setData(Qt.UserRole, {
+                            'path': folder_data['path'],
+                            'is_dir': folder_data['isdir'],
+                            'fs_id': folder_data['fs_id']
+                        })
+                        first_item.setData(Qt.UserRole + 1, f"路径: {folder_data['path']}")
+
+                        self.file_table.setItem(0, 1, QTableWidgetItem(""))
+
+                        from utils.file_utils import FileUtils
+                        time_str = FileUtils.format_time(folder_data['server_mtime'])
+                        self.file_table.setItem(0, 2, QTableWidgetItem(time_str))
+
+                        self.file_table.clearSelection()
+
+                self._cleanup_folder_creation()
+            else:
+                logger.error(f"文件夹创建失败: {folder_name}")
+                # 删除第一行的临时item
+                if self.file_table.rowCount() > 0:
+                    first_item = self.file_table.item(0, 0)
+                    if first_item and not first_item.data(Qt.UserRole):
+                        self.file_table.removeRow(0)
+                        logger.info(f"已删除失败的文件夹临时行")
+
+                # 清理状态
+                self._cleanup_folder_creation()
+
+                # 显示错误消息
+                QTimer.singleShot(0, lambda: self._show_create_folder_error(folder_name))
+
+            self.current_worker = None
+
+        self.current_worker = CreateFolderTask(self.api_client, full_path, on_create_complete)
+        QThreadPool.globalInstance().start(self.current_worker)
+
+    def eventFilter(self, obj, event):
+        """事件过滤器，用于监听按键和点击事件"""
+        # 禁用表格的拖动选择
+        if obj == self.file_table.viewport():
+            if event.type() == event.MouseButtonPress:
+                if event.button() == Qt.LeftButton:
+                    # 记录鼠标按下位置
+                    self._drag_start_pos = event.pos()
+            elif event.type() == event.MouseMove:
+                # 检查是否在拖动（移动距离超过阈值）
+                if self._drag_start_pos is not None:
+                    drag_distance = (event.pos() - self._drag_start_pos).manhattanLength()
+                    if drag_distance > 5:  # 超过5像素视为拖动
+                        # 阻止拖动选择
+                        return True
+            elif event.type() == event.MouseButtonRelease:
+                # 清除拖动起始位置
+                self._drag_start_pos = None
+
+        # 只在创建文件夹时处理以下事件
+        if not getattr(self, 'creating_folder', False):
+            return super().eventFilter(obj, event)
+
+        # 监听点击表格空白处的事件
+        if event.type() == event.MouseButtonPress and event.button() == Qt.LeftButton:
+            # 检查是否点击在 file_table 的视口上（空白处）
+            if obj == self.file_table.viewport():
+                logger.info("检测到点击表格空白处")
+
+                # 使用 QTimer 延迟处理，确保编辑器先提交数据
+                QTimer.singleShot(0, self._handle_click_outside)
+                return super().eventFilter(obj, event)
+
+        # 监听按键事件 - 处理回车键确认创建
+        if obj == self.file_table and event.type() == event.KeyPress:
+            if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+                # 检查当前编辑的item
+                current_item = self.file_table.currentItem()
+                if current_item and current_item.row() == 0 and current_item.column() == 0:
+                    # 检查是否有UserRole数据（没有说明是临时item）
+                    if not current_item.data(Qt.UserRole):
+                        # 使用 QTimer 延迟处理，确保编辑器先提交数据
+                        QTimer.singleShot(0, self._handle_enter_key)
+                        return True
+
+        return super().eventFilter(obj, event)
+
+    def _handle_enter_key(self):
+        """处理回车键（延迟调用，确保编辑器已提交数据）"""
+        if not getattr(self, 'creating_folder', False):
+            return
+
+        logger.info("延迟处理回车键事件")
+
+        # 检查第一行是否是临时item
+        if self.file_table.rowCount() > 0:
+            first_item = self.file_table.item(0, 0)
+            if first_item and not first_item.data(Qt.UserRole):
+                # 检查临时item是否还存在（可能已被其他事件处理）
+                temp_edit_item = getattr(self, '_temp_edit_item', None)
+                if temp_edit_item is None:
+                    logger.info("临时item已被处理，跳过")
+                    return
+
+                # 检查是否真的是我们创建的临时item
+                if first_item == temp_edit_item:
+                    folder_name = first_item.text().strip()
+
+                    if not folder_name:
+                        logger.info("按回车且内容为空，删除临时item")
+                        # 显示泡泡提醒
+                        self._show_empty_name_tooltip()
+                        self.creating_folder = False
+                        self.file_table.removeRow(0)
+                        self._cleanup_folder_creation()
+                        self.status_label.setText("未创建文件夹")
+                    else:
+                        logger.info(f"按回车确认创建文件夹: {folder_name}")
+                        # 先清除标志，防止重复处理
+                        self._temp_edit_item = None
+                        self._finalize_folder_creation(folder_name)
+                else:
+                    logger.info("第一行不是临时item，跳过")
+
+    def _handle_click_outside(self):
+        """处理点击外部（延迟调用，确保编辑器已提交数据）"""
+        if not getattr(self, 'creating_folder', False):
+            return
+
+        logger.info("延迟处理点击外部事件")
+
+        # 检查第一行是否是临时item
+        if self.file_table.rowCount() > 0:
+            first_item = self.file_table.item(0, 0)
+            if first_item and not first_item.data(Qt.UserRole):
+                # 检查临时item是否还存在（可能已被 on_item_changed 处理）
+                temp_edit_item = getattr(self, '_temp_edit_item', None)
+                if temp_edit_item is None:
+                    logger.info("临时item已被处理（on_item_changed已处理），跳过")
+                    return
+
+                # 检查是否真的是我们创建的临时item
+                if first_item == temp_edit_item:
+                    folder_name = first_item.text().strip()
+
+                    # 检查当前选中项是否仍然是临时item（说明没有点击其他item）
+                    current = self.file_table.currentItem()
+
+                    # 只有当current仍然是临时item，或者current为None时才处理
+                    if current is not None and current.row() == 0 and current.column() == 0:
+                        # current仍然是临时item，说明点击的是空白处
+                        if not folder_name:
+                            logger.info("点击空白处且内容为空，删除临时item")
+                            # 显示泡泡提醒
+                            self._show_empty_name_tooltip()
+                            self.creating_folder = False
+                            self.file_table.removeRow(0)
+                            self._cleanup_folder_creation()
+                            self.status_label.setText("未创建文件夹")
+                        else:
+                            logger.info(f"点击空白处且有内容: {folder_name}，创建文件夹")
+                            # 先清除标志，防止重复处理
+                            self._temp_edit_item = None
+                            self._finalize_folder_creation(folder_name)
+                    elif current is None:
+                        # current为None
+                        if not folder_name:
+                            logger.info("点击空白处且内容为空，删除临时item")
+                            # 显示泡泡提醒
+                            self._show_empty_name_tooltip()
+                            self.creating_folder = False
+                            self.file_table.removeRow(0)
+                            self._cleanup_folder_creation()
+                            self.status_label.setText("未创建文件夹")
+                        else:
+                            logger.info(f"点击空白处且有内容: {folder_name}，创建文件夹")
+                            # 先清除标志，防止重复处理
+                            self._temp_edit_item = None
+                            self._finalize_folder_creation(folder_name)
+                    else:
+                        logger.info(f"点击了其他item (row={current.row()}, col={current.column()})，由 on_current_item_changed 处理")
+                else:
+                    logger.info("第一行不是临时item，跳过")
+
+    def on_current_item_changed(self, current, previous):
+        """当前项改变时触发"""
+        # 如果正在创建文件夹，检查是否需要完成或取消创建
+        if not getattr(self, 'creating_folder', False):
+            return
+
+        logger.info(f"currentItemChanged触发: current={current}, previous={previous}")
+
+        # 检查第一行是否是临时item
+        if self.file_table.rowCount() > 0:
+            first_item = self.file_table.item(0, 0)
+            if first_item and not first_item.data(Qt.UserRole):
+                # 检查是否真的是我们创建的临时item（通过比较对象引用）
+                if first_item == getattr(self, '_temp_edit_item', None):
+                    folder_name = first_item.text().strip()
+
+                    # 点击了其他item（current不是第一行第一列的临时item，且不是None）
+                    # 如果current是None，说明点击了空白处，由 _handle_click_outside 处理
+                    if current is not None and (current.row() != 0 or current.column() != 0):
+                        if not folder_name:
+                            # 内容为空，删除临时item
+                            logger.info("点击其他item且内容为空，删除临时item")
+                            # 显示泡泡提醒
+                            self._show_empty_name_tooltip()
+                            self.creating_folder = False
+                            self.file_table.removeRow(0)
+                            self._cleanup_folder_creation()
+                            self.status_label.setText("未创建文件夹")
+                            return
+                        else:
+                            # 有内容，创建文件夹
+                            logger.info(f"点击其他item且内容为: {folder_name}，创建文件夹")
+                            self._temp_edit_item = None  # 清除标志，防止重复
+                            self._finalize_folder_creation(folder_name)
+                            return
+                    else:
+                        logger.info("current仍然是临时item或点击空白处，不处理或由其他函数处理")
+                else:
+                    logger.info("第一行不是临时item，跳过（可能已被 _handle_click_outside 处理）")
+        else:
+            logger.info("表格行数为0")
 
     def _is_valid_folder_name(self, name: str) -> bool:
         """检查文件夹名称是否合法"""
@@ -802,6 +1243,9 @@ class MainWindow(QMainWindow):
         if item:
             data = item.data(Qt.UserRole)
 
+            # 在任何情况下都显示新建文件夹选项
+            menu.addAction("📁 新建文件夹", self.create_folder_dialog)
+
             menu.addAction("📋 复制文件名", lambda: self.copy_item_text(item.text()))
 
             if data:
@@ -840,15 +1284,25 @@ class MainWindow(QMainWindow):
         """处理单元格内容变化"""
         # 处理新建文件夹的情况
         if getattr(self, 'creating_folder', False) and item.row() == 0 and item.column() == 0:
-            self.creating_folder = False
-            folder_name = item.text().strip()
+            # 保存原始文本，用于判断是否真的有输入
+            original_text = getattr(self, '_original_folder_text', '')
 
-            logger.info(f"新建文件夹编辑完成: '{folder_name}'")
+            # 检查是否真的有变化（从空到空不应该触发）
+            current_text = item.text()
+            if current_text == original_text:
+                logger.info(f"文本没有变化（从 '{original_text}' 到 '{current_text}'），忽略")
+                return
+
+            folder_name = current_text.strip()
+            logger.info(f"新建文件夹编辑完成: '{folder_name}', 原始文本: '{original_text}'")
 
             # 如果没有输入名字，删除该行
             if not folder_name:
                 logger.info("文件夹名称为空，取消创建")
-                QTimer.singleShot(0, lambda: self.file_table.removeRow(0))
+                logger.info(f"删除前行数: {self.file_table.rowCount()}")
+                self.file_table.removeRow(0)
+                logger.info(f"删除后行数: {self.file_table.rowCount()}")
+                self._cleanup_folder_creation()
                 self.status_label.setText("未创建文件夹")
                 return
 
@@ -856,7 +1310,8 @@ class MainWindow(QMainWindow):
             if not self._is_valid_folder_name(folder_name):
                 logger.warning(f"文件夹名称无效: '{folder_name}'")
                 QMessageBox.warning(self, "提示", "文件夹名称包含非法字符")
-                QTimer.singleShot(0, lambda: self.file_table.removeRow(0))
+                self.file_table.removeRow(0)
+                self._cleanup_folder_creation()
                 self.status_label.setText("文件夹名称无效")
                 return
 
@@ -868,13 +1323,22 @@ class MainWindow(QMainWindow):
                 if existing_item and existing_item.text() == folder_name:
                     logger.warning(f"文件夹已存在: '{folder_name}'")
                     QMessageBox.warning(self, "提示", f"已存在名为 '{folder_name}' 的文件或文件夹")
-                    QTimer.singleShot(0, lambda: self.file_table.removeRow(0))
+                    self.file_table.removeRow(0)
+                    self._cleanup_folder_creation()
                     self.status_label.setText("取消创建文件夹")
                     return
 
             # 创建文件夹
-            full_path = f"{self.current_path.rstrip('/')}/{folder_name}"
-            logger.info(f"开始创建文件夹: {full_path}")
+            # 先清除临时item标志，防止 _handle_click_outside 重复处理
+            temp_item = self._temp_edit_item
+            self._temp_edit_item = None
+
+            # 处理根目录的情况
+            if self.current_path == "/":
+                full_path = f"/{folder_name}"
+            else:
+                full_path = f"{self.current_path.rstrip('/')}/{folder_name}"
+            logger.info(f"开始创建文件夹: {full_path}, 当前路径: {self.current_path}")
 
             # 临时禁用表格
             self.file_table.setEnabled(False)
@@ -901,10 +1365,58 @@ class MainWindow(QMainWindow):
                 if result:
                     logger.info(f"文件夹创建成功: {folder_name}")
                     self.status_label.setText(f"文件夹 '{folder_name}' 创建成功")
-                    # 刷新当前目录
-                    self.update_items(self.current_path)
+
+                    # 直接更新第一行的item，将其转换为正常的文件夹项
+                    if self.file_table.rowCount() > 0:
+                        first_item = self.file_table.item(0, 0)
+                        if first_item and not first_item.data(Qt.UserRole):
+                            logger.info("更新第一行item为正常文件夹项")
+
+                            # 构建文件夹数据
+                            folder_data = {
+                                'path': full_path,
+                                'isdir': True,
+                                'fs_id': int(time.time() * 1000),  # 临时使用时间戳作为fs_id
+                                'server_filename': folder_name,
+                                'size': 0,
+                                'server_mtime': int(time.time())
+                            }
+
+                            # 更新第一行
+                            first_item.setText(folder_name)
+                            first_item.setIcon(self.style().standardIcon(QStyle.SP_DirIcon))
+                            first_item.setData(Qt.UserRole, {
+                                'path': folder_data['path'],
+                                'is_dir': folder_data['isdir'],
+                                'fs_id': folder_data['fs_id']
+                            })
+                            first_item.setData(Qt.UserRole + 1, f"路径: {folder_data['path']}")
+
+                            # 设置大小列为空（文件夹不显示大小）
+                            self.file_table.setItem(0, 1, QTableWidgetItem(""))
+
+                            # 设置修改时间为当前时间
+                            from utils.file_utils import FileUtils
+                            time_str = FileUtils.format_time(folder_data['server_mtime'])
+                            self.file_table.setItem(0, 2, QTableWidgetItem(time_str))
+
+                            # 取消选中状态
+                            self.file_table.clearSelection()
+
+                    # 清理状态
+                    self._cleanup_folder_creation()
                 else:
                     logger.error(f"文件夹创建失败: {folder_name}")
+                    # 删除第一行的临时item
+                    if self.file_table.rowCount() > 0:
+                        first_item = self.file_table.item(0, 0)
+                        if first_item and not first_item.data(Qt.UserRole):
+                            self.file_table.removeRow(0)
+                            logger.info(f"已删除失败的文件夹临时行")
+
+                    # 清理状态
+                    self._cleanup_folder_creation()
+
                     # 使用 QTimer 延迟显示消息框，避免在回调中直接显示
                     QTimer.singleShot(0, lambda: self._show_create_folder_error(folder_name))
 
@@ -963,14 +1475,14 @@ class MainWindow(QMainWindow):
 
     def _show_create_folder_error(self, folder_name):
         """显示创建文件夹失败的错误消息"""
-        # 安全地删除第一行（如果存在）
+        # 检查是否还有临时item需要删除（某些情况下可能还没删除）
         if self.file_table.rowCount() > 0:
             first_item = self.file_table.item(0, 0)
-            if first_item and first_item.text() == folder_name:
+            if first_item and not first_item.data(Qt.UserRole):
                 self.file_table.removeRow(0)
-                logger.info(f"已删除失败的文件夹行: {folder_name}")
+                logger.info(f"已删除失败的文件夹临时行: {folder_name}")
 
-        QMessageBox.warning(self, "失败", f"文件夹 '{folder_name}' 创建失败")
+        QMessageBox.warning(self, "创建失败", f"文件夹 '{folder_name}' 创建失败\n\n可能原因：\n- 文件夹已存在\n- 网络连接问题\n- 权限不足")
 
     def on_rename_success(self, result):
         self.renaming_item = self.original_text = None
@@ -991,22 +1503,61 @@ class MainWindow(QMainWindow):
         QToolTip.showText(pos, text, p_str, rect)
 
     def delete_file(self, data=None):
-        """删除文件"""
-        data = data or self.file_table.currentItem().data(Qt.UserRole)
-        if not data:
+        """删除文件（支持批量删除）"""
+        selected_items = self.file_table.selectedItems()
+        if not selected_items:
             return
 
-        reply = QMessageBox.question(
-            self, '删除确认',
-            f"确定要删除 {data['path'].split('/')[-1]} 吗？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+        # 收集所有选中行的文件信息（去重，因为每行有3列）
+        file_list = []
+        rows_to_delete = set()
+        for item in selected_items:
+            row = item.row()
+            if row not in rows_to_delete:
+                rows_to_delete.add(row)
+                name_item = self.file_table.item(row, 0)
+                if name_item:
+                    data = name_item.data(Qt.UserRole)
+                    if data:
+                        file_list.append(data)
 
-        if reply == QMessageBox.Yes:
-            if self.api_client.delete_files([data['path']]):
-                self.update_items(self.current_path)
-                self.status_label.setText(f"已删除: {data['path'].split('/')[-1]}")
+        if not file_list:
+            return
+
+        # 确认删除
+        file_count = len(file_list)
+        if file_count == 1:
+            message = f"确定要删除 '{file_list[0]['path'].split('/')[-1]}' 吗？"
+        else:
+            message = f"确定要删除选中的 {file_count} 个项目吗？"
+
+        # 创建自定义消息框，使用中文按钮
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle('删除确认')
+        msg_box.setText(message)
+        msg_box.setIcon(QMessageBox.Question)
+
+        # 添加自定义按钮
+        yes_btn = msg_box.addButton("是", QMessageBox.YesRole)
+        no_btn = msg_box.addButton("否", QMessageBox.NoRole)
+
+        # 设置默认按钮为"是"
+        msg_box.setDefaultButton(yes_btn)
+
+        msg_box.exec_()
+
+        # 检查点击的按钮
+        if msg_box.clickedButton() == yes_btn:
+            # 收集所有文件路径
+            file_paths = [f['path'] for f in file_list]
+
+            # 批量删除
+            if self.api_client.delete_files(file_paths):
+                # 从表格中删除所有选中的行（从后往前删除，避免行号变化）
+                for row in sorted(rows_to_delete, reverse=True):
+                    self.file_table.removeRow(row)
+
+                self.status_label.setText(f"已删除 {file_count} 个项目")
             else:
                 QMessageBox.warning(self, "失败", "删除文件失败")
 
@@ -1027,6 +1578,39 @@ class MainWindow(QMainWindow):
         global_pos = self.file_table.viewport().mapToGlobal(rect.topLeft())
         QTimer.singleShot(100, lambda: self.show_tooltip(global_pos, f"已添加下载任务: {item.text()}", self, rect))
 
+    def get_file_type_icon(self, filename, is_dir=False):
+        """根据文件名和类型获取对应的图标"""
+        if is_dir:
+            return self.style().standardIcon(QStyle.SP_DirIcon)
+
+        _, ext = os.path.splitext(filename.lower())
+
+        # 使用 QStyle 标准图标区分不同类型
+        # 图片 - SP_DialogOpenButton
+        # 音频 - SP_MediaVolume
+        # 视频 - SP_MediaPlay
+        # 文档 - SP_FileIcon
+        # 压缩包 - SP_DriveCDIcon
+
+        image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.svg', '.webp', '.ico'}
+        audio_exts = {'.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a'}
+        video_exts = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.rmvb'}
+        archive_exts = {'.zip', '.rar', '.7z', '.tar', '.gz', '.bz2'}
+        doc_exts = {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'}
+
+        if ext in image_exts:
+            return self.style().standardIcon(QStyle.SP_DialogOpenButton)
+        elif ext in audio_exts:
+            return self.style().standardIcon(QStyle.SP_MediaVolume)
+        elif ext in video_exts:
+            return self.style().standardIcon(QStyle.SP_MediaPlay)
+        elif ext in archive_exts:
+            return self.style().standardIcon(QStyle.SP_DriveCDIcon)
+        elif ext in doc_exts:
+            return self.style().standardIcon(QStyle.SP_FileIcon)
+        else:
+            return self.style().standardIcon(QStyle.SP_FileIcon)
+
     # 设置表格项目
     def set_list_items(self, files):
         self.file_table.setRowCount(len(files))
@@ -1039,6 +1623,10 @@ class MainWindow(QMainWindow):
                 size = file.get('size', 0)
                 tooltip_text += f"\n大小: {FileUtils.format_size(size)}"
             name_item.setData(Qt.UserRole + 1, tooltip_text)
+
+            # 设置文件类型图标
+            icon = self.get_file_type_icon(file['server_filename'], file['isdir'])
+            name_item.setIcon(icon)
 
             self.file_table.setItem(row, 0, name_item)
 
@@ -1111,10 +1699,45 @@ class MainWindow(QMainWindow):
     def on_login_success(self, result):
         """登录成功处理"""
         print(f"登录成功，账号: {result['account_name']}")  # 添加调试信息
+        logger.info(f"🔐 登录成功，账号: {result['account_name']}")
 
         self.current_account = result['account_name']
+
+        logger.info("📦 初始化 API 客户端...")
         self.initialize_api_client()
+
+        logger.info("👤 更新用户信息...")
         self.update_user_info()
+
+        # 设置用户UK到 transfer_manager（必须在 initialize_api_client 之后）
+        logger.info("🔑 准备设置用户UK到 transfer_manager...")
+        try:
+            logger.info(f"当前 API 客户端状态: access_token={bool(self.api_client.access_token)}")
+
+            user_info = self.api_client.get_user_info()
+            logger.info(f"获取用户信息结果: {bool(user_info)}")
+
+            if user_info:
+                logger.info(f"用户信息内容: {user_info}")
+                uk = user_info.get('uk')
+                logger.info(f"提取的UK: {uk}")
+
+                if uk:
+                    self.transfer_manager.set_user_uk(uk)
+                    logger.info(f"✅ 设置用户UK成功: {uk}")
+                else:
+                    logger.warning("⚠️ 用户信息中未找到UK字段")
+                    logger.warning(f"用户信息键: {list(user_info.keys())}")
+            else:
+                logger.warning("⚠️ 获取用户信息失败或返回空值")
+        except Exception as e:
+            logger.error(f"❌ 获取或设置用户UK失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+        # 恢复未完成的任务
+        logger.info("📋 登录成功，开始恢复未完成的任务...")
+        self.transfer_manager.resume_incomplete_tasks()
 
         # 先切换到文件管理页面
         self.switch_to_file_manage_page()
@@ -1127,6 +1750,10 @@ class MainWindow(QMainWindow):
         # 更新状态栏
         self.status_label.setText(f"已登录: {self.current_account}")
 
+        # 加载根目录文件列表
+        logger.info("📂 加载根目录文件列表...")
+        self.update_items("/")
+
     def initialize_api_client(self):
         self.api_client = BaiduPanAPI()
 
@@ -1138,6 +1765,12 @@ class MainWindow(QMainWindow):
                 if self.api_client._load_current_account():
                     self.current_account = self.api_client.current_account
                     logger.info(f"已加载最近使用的账号: {self.current_account}")
+
+        # 同步 token 到 transfer_manager
+        if self.api_client.access_token:
+            self.transfer_manager.api_client.access_token = self.api_client.access_token
+            self.transfer_manager.api_client.current_account = self.api_client.current_account
+            logger.info(f"已同步 token 到 transfer_manager")
 
     def update_user_info(self):
         try:
@@ -1218,66 +1851,45 @@ class MainWindow(QMainWindow):
 
             # 标题
             title_label = QLabel('选择要切换的账号')
-            title_label.setStyleSheet('font-size: 16px; font-weight: bold; padding: 5px;')
+            title_label.setObjectName("dialogTitle")
             layout.addWidget(title_label)
 
             # 账号列表
             account_list = QListWidget()
+            account_list.setObjectName("accountList")
 
             # 明确禁用交替行颜色
             account_list.setAlternatingRowColors(False)
 
-            # 简单的容器样式
-            account_list.setStyleSheet('''
-                QListWidget {
-                    border: 1px solid #ddd;
-                    border-radius: 5px;
-                    padding: 5px;
-                    background-color: white;
-                    outline: none;
-                }
-                QListWidget::item {
-                    padding: 12px;
-                    border-radius: 3px;
-                    font-size: 13px;
-                }
-                QListWidget::item:selected {
-                    background-color: #2196F3;
-                    color: white;
-                }
-            ''')
-
             # 添加账号到列表 - 当前账号排在第一位
             for account_name in sorted_accounts:
                 if account_name == self.current_account:
-                    # 当前账号 - 浅蓝色背景，不可选择
+                    # 当前账号 - 不可选择
                     display_text = f"📍 {account_name} (当前)"
                     item = QListWidgetItem(display_text)
                     item.setData(Qt.UserRole, account_name)
 
-                    # 直接设置背景色和前景色
-                    from PyQt5.QtGui import QBrush, QColor
-                    item.setBackground(QBrush(QColor(200, 230, 255)))  # 浅蓝色
-                    item.setForeground(QBrush(QColor(60, 90, 110)))    # 深灰蓝色
-
                     # 设置为不可选择
                     item.setFlags(Qt.ItemIsEnabled)
                     item.setToolTip("这是当前账号，无法切换")
+
+                    # 标记为当前账号
+                    item.setData(Qt.UserRole + 1, "current")
                 else:
-                    # 其他账号 - 白色背景，可选择
+                    # 其他账号 - 可选择
                     display_text = f"👤 {account_name}"
                     item = QListWidgetItem(display_text)
                     item.setData(Qt.UserRole, account_name)
 
-                    # 直接设置背景色和前景色
-                    from PyQt5.QtGui import QBrush, QColor
-                    item.setBackground(QBrush(QColor(255, 255, 255)))  # 白色
-                    item.setForeground(QBrush(QColor(0, 0, 0)))        # 黑色
-
                     # 设置可选择
                     item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
 
+                    # 标记为其他账号
+                    item.setData(Qt.UserRole + 1, "other")
+
                 account_list.addItem(item)
+
+            # 不需要事件过滤器了，QSS会处理hover效果
 
             layout.addWidget(account_list)
 
@@ -1341,6 +1953,12 @@ class MainWindow(QMainWindow):
             # 执行切换
             if self.api_client.switch_account(account_name):
                 self.current_account = account_name
+
+                # 同步 token 到 transfer_manager
+                self.transfer_manager.api_client.access_token = self.api_client.access_token
+                self.transfer_manager.api_client.current_account = self.api_client.current_account
+                logger.info("已同步 token 到 transfer_manager")
+
                 self.update_user_info()
                 self.update_items(self.current_path)
                 self.hide_status_progress()
@@ -1412,6 +2030,10 @@ class MainWindow(QMainWindow):
                 # 执行切换
                 if self.api_client.switch_account(account_name):
                     self.current_account = account_name
+
+                    # 同步 token 到 transfer_manager
+                    self.transfer_manager.api_client.access_token = self.api_client.access_token
+                    self.transfer_manager.api_client.current_account = self.api_client.current_account
 
                     # 停止所有正在进行的文件加载任务
                     if self.current_worker and self.current_worker.isRunning():

@@ -4,7 +4,7 @@ import re
 import time
 
 from PyQt5.QtCore import pyqtSignal, Qt, QThread, QUrl, QPoint
-from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineProfile
 from PyQt5.QtWidgets import *
 
 from core.api_client import BaiduPanAPI
@@ -130,10 +130,6 @@ class LoginDialog(QDialog):
         button_layout.addWidget(cancel_button)
 
         self.layout.addLayout(button_layout)
-
-        # 连接信号
-        # self.code_input.textChanged.connect(self.validate_input)
-        # self.account_name_input.textChanged.connect(self.validate_input)
 
         # 设置焦点
         self.account_name_input.setFocus()
@@ -315,6 +311,9 @@ class WebPopup(QDialog):
         self.setWindowTitle("Web Page")
         self.setFixedSize(800, 600)
 
+        # 清除所有缓存和cookies
+        self.clear_browser_cache()
+
         # 创建 QWebEngineView 显示网页
         browser = QWebEngineView(self)
         browser.urlChanged.connect(self.on_url_changed)
@@ -328,6 +327,18 @@ class WebPopup(QDialog):
 
         # 设置布局
         self.setLayout(layout)
+
+    def clear_browser_cache(self):
+        """清除浏览器缓存和cookies"""
+        try:
+            profile = QWebEngineProfile.defaultProfile()
+            # 清除所有cookies
+            profile.cookieStore().deleteAllCookies()
+            # 清除HTTP缓存
+            profile.clearHttpCache()
+            logger.info('已清除浏览器缓存和cookies')
+        except Exception as e:
+            logger.warning(f'清除缓存时出错: {e}')
 
     def on_url_changed(self, url):
         """URL变化时触发"""

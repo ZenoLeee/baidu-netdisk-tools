@@ -5,6 +5,7 @@ import threading
 from typing import List, Dict, Any, Optional
 from queue import Queue
 from dataclasses import dataclass, field
+from threading import Event
 
 from core.api_client import BaiduPanAPI
 from utils.logger import get_logger
@@ -23,43 +24,169 @@ class TransferTask:
     status: str = "等待中"
     progress: float = 0.0
     speed: float = 0.0
-    
+
     # 分片上传相关
     total_chunks: int = 0
     current_chunk: int = 0
     chunk_size: int = UploadConstants.CHUNK_SIZE
     uploaded_chunks: List[int] = field(default_factory=list)
-    
+    block_list_md5: List[str] = field(default_factory=list)  # 分片MD5列表
+
     # 断点续传相关
     local_path: Optional[str] = None  # 本地文件路径
     uploadid: Optional[str] = None
     last_update_time: float = field(default_factory=time.time)
-    
+
     # 错误信息
     error_message: Optional[str] = None
+
+    # 控制标志
+    stop_event: Event = field(default_factory=Event)  # 用于控制暂停/停止
 
 
 class TransferManager:
     """传输管理器"""
-    
+
     def __init__(self):
         self.tasks: List[TransferTask] = []
         self.task_id_counter = 0
         self.api_client = BaiduPanAPI()
         self.resume_data_dir = "resume_data"
         self._ensure_resume_dir()
+        self.upload_complete_callback = None  # 上传完成回调函数
+        self.current_user_uk = None  # 当前登录用户的 UK
+        self.pending_save_tasks = []  # 待保存断点数据的任务（未登录时添加的任务）
+
+        # 延迟恢复任务（等登录后再恢复）
+        self.tasks_loaded = False
         
     def _ensure_resume_dir(self):
         """确保断点续传数据目录存在"""
         if not os.path.exists(self.resume_data_dir):
             os.makedirs(self.resume_data_dir)
+
+    def set_upload_complete_callback(self, callback):
+        """设置上传完成回调函数"""
+        self.upload_complete_callback = callback
+
+    def _notify_upload_complete(self, task):
+        """通知上传完成"""
+        if self.upload_complete_callback:
+            try:
+                self.upload_complete_callback(task)
+            except Exception as e:
+                logger.error(f"上传完成回调执行失败: {e}")
     
-    def _get_resume_file_path(self, task_id):
-        """获取断点续传数据文件路径"""
-        return os.path.join(self.resume_data_dir, f"{task_id}.json")
+    def _get_resume_file_path(self, user_uk=None):
+        """获取断点续传数据文件路径（基于用户UK）"""
+        uk = user_uk or self.current_user_uk
+        if not uk:
+            logger.warning("未找到用户UK，无法获取断点续传文件路径")
+            return None
+        return os.path.join(self.resume_data_dir, f"{uk}.json")
+
+    def set_user_uk(self, uk):
+        """设置当前用户UK（登录成功后调用）"""
+        self.current_user_uk = uk
+        logger.info(f"设置当前用户UK: {uk}")
+
+        # 保存所有待保存的任务
+        if self.pending_save_tasks:
+            logger.info(f"保存 {len(self.pending_save_tasks)} 个待保存任务的断点数据")
+            for task in self.pending_save_tasks:
+                if task.local_path and task.chunk_size > 0:
+                    self._save_resume_data(task)
+            self.pending_save_tasks.clear()
     
-    def add_task(self, name: str, remote_path: str, size: int, task_type: str, local_path: Optional[str] = None) -> TransferTask:
+    def _calculate_optimal_chunk_size(self, file_size: int, member_type: str) -> int:
+        """
+        动态计算最优分片大小（按照百度官方规则）
+
+        规则：
+        1. 小文件 ≤ 4MB：直接上传，不切片
+        2. 分片上传最小分片：4MB（不管什么用户）
+        3. 分片数量不能超过1024
+        4. 普通用户：4MB/片，最大4GB
+        5. 普通会员：16MB/片，最大10GB
+        6. 超级会员：32MB/片，最大20GB
+        7. 当分片超过1024时，精细控制分片大小
+
+        Args:
+            file_size: 文件大小
+            member_type: 会员类型
+
+        Returns:
+            最优分片大小
+        """
+        from core.constants import UploadConstants
+
+        # 小文件直接上传
+        MIN_CHUNKED_SIZE = 4 * 1024 * 1024  # 4MB
+        if file_size <= MIN_CHUNKED_SIZE:
+            logger.info(f"文件太小 ({file_size} bytes)，使用直接上传")
+            return 0  # 0 表示不需要分片
+
+        # 获取会员配置
+        member_config = UploadConstants.MEMBER_TYPE_CONFIG.get(
+            member_type,
+            UploadConstants.MEMBER_TYPE_CONFIG['normal']
+        )
+        max_chunk_size = member_config['max_chunk_size']  # 会员最大分片
+        max_file_size = member_config['max_file_size']  # 会员最大文件
+
+        # 检查文件大小是否超过限制
+        if file_size > max_file_size:
+            logger.error(f"文件大小 ({file_size} bytes) 超过当前会员类型 ({member_config['name']}) 的限制 ({max_file_size} bytes)")
+            return 0
+
+        # 最小分片大小：4MB
+        MIN_CHUNK_SIZE = 4 * 1024 * 1024  # 4MB
+
+        # 计算使用最小分片时的分片数
+        chunks_with_min = (file_size + MIN_CHUNK_SIZE - 1) // MIN_CHUNK_SIZE
+
+        # 如果使用最小分片数量不超过1024，就用4MB
+        if chunks_with_min <= 1024:
+            chunk_size = MIN_CHUNK_SIZE
+            total_chunks = chunks_with_min
+        else:
+            # 超过1024个分片，需要精细计算分片大小
+            # 目标：让分片数正好是1024，或者使用会员最大分片
+            min_chunk_for_1024 = (file_size + 1023) // 1024  # 满足1024分片的最小分片
+
+            # 使用 min_chunk_for_1024 和 max_chunk_size 中较小的
+            chunk_size = min(min_chunk_for_1024, max_chunk_size)
+            total_chunks = (file_size + chunk_size - 1) // chunk_size
+
+            logger.info(f"文件较大，使用精细分片: 分片大小={chunk_size}, 分片数={total_chunks}")
+
+        logger.info(f"分片计算: 文件大小={file_size}, 分片大小={chunk_size}, 分片数={total_chunks}, 会员={member_type}")
+
+        return chunk_size
+
+    def add_task(self, name: str, remote_path: str, size: int, task_type: str, local_path: Optional[str] = None) -> Optional[TransferTask]:
         """添加传输任务"""
+        # 如果是上传任务，根据会员类型设置分片大小
+        if task_type == 'upload':
+            # 获取会员类型
+            member_type = self.api_client.get_member_type()
+
+            # 动态计算最优分片大小（按照百度官方规则）
+            chunk_size = self._calculate_optimal_chunk_size(size, member_type)
+
+            # 如果 chunk_size = 0，说明文件太小或超过限制
+            if chunk_size == 0:
+                # 文件 ≤ 4MB 或超过限制
+                if size <= 4 * 1024 * 1024:
+                    # 小文件，直接上传
+                    logger.info(f"小文件直接上传: {name}, 大小: {size}")
+                else:
+                    # 超过限制
+                    return None
+
+            # 计算分片数
+            total_chunks = (size + chunk_size - 1) // chunk_size if chunk_size > 0 else 0
+
         self.task_id_counter += 1
         task = TransferTask(
             task_id=self.task_id_counter,
@@ -69,12 +196,31 @@ class TransferManager:
             type=task_type,
             local_path=local_path
         )
-        
+
         # 设置分片信息
-        if task_type == 'upload' and size > task.chunk_size:
-            task.total_chunks = (size + task.chunk_size - 1) // task.chunk_size
-        
+        if task_type == 'upload' and chunk_size > 0:
+            task.chunk_size = chunk_size
+            task.total_chunks = total_chunks
+            logger.info(f"文件分片上传: {name}, 大小: {size}, 分片大小: {chunk_size}, 分片数: {task.total_chunks}")
+        elif task_type == 'upload' and chunk_size == 0:
+            # 小文件，不使用分片
+            task.chunk_size = 0
+            task.total_chunks = 0
+            logger.info(f"文件直接上传: {name}, 大小: {size}")
+
         self.tasks.append(task)
+
+        # 立即保存断点续传数据（在添加任务时就保存，防止用户关闭软件）
+        if task_type == 'upload' and local_path and chunk_size > 0:
+            if self.current_user_uk:
+                # 已登录，直接保存
+                self._save_resume_data(task)
+                logger.info(f"保存断点续传数据（任务添加时）: {name}")
+            else:
+                # 未登录，添加到待保存列表
+                self.pending_save_tasks.append(task)
+                logger.info(f"添加到待保存列表（未登录）: {name}")
+
         return task
     
     def start_upload(self, task: TransferTask):
@@ -83,42 +229,77 @@ class TransferManager:
             task.status = "失败"
             task.error_message = "本地文件不存在"
             return
-        
-        if task.size > task.chunk_size:
-            # 大文件，分片上传
+
+        # 确保使用新的 stop_event（避免之前暂停的状态残留）
+        task.stop_event = Event()
+
+        # 根据是否有分片选择上传方式
+        if task.total_chunks > 0:
+            # 有分片，使用分片上传
             thread = threading.Thread(target=self._upload_chunked, args=(task,))
         else:
-            # 小文件，直接上传
+            # 无分片（小文件 ≤ 4MB），使用直接上传
             thread = threading.Thread(target=self._upload_simple, args=(task,))
-        
         thread.daemon = True
         thread.start()
     
     def _upload_simple(self, task: TransferTask):
-        """直接上传小文件"""
+        """小文件直接上传（≤ 4MB）"""
         try:
             task.status = "上传中"
-            
+
             # 构建远程完整路径
             remote_full_path = f"{task.remote_path.rstrip('/')}/{task.name}"
-            
-            # 调用API上传
-            result = self.api_client.upload_file(task.local_path, remote_full_path)
-            
+
+            logger.info(f"开始直接上传小文件: {task.name}, 大小: {task.size}")
+
+            # 使用单步上传
+            result = self.api_client.upload_file_simple(
+                task.local_path,
+                remote_full_path,
+                task
+            )
+
             if result.get('success'):
                 task.status = "完成"
                 task.progress = 100
+                task.speed = 0
+
+                # 检查是否因为重名而改变了文件名
+                actual_name = result.get('actual_name')
+                if actual_name and actual_name != task.name:
+                    logger.info(f"文件被重命名: {task.name} -> {actual_name}")
+                    task.name = actual_name
+
+                # 如果是测试文件，删除本地临时文件
+                if task.local_path and 'test_upload_' in os.path.basename(task.local_path):
+                    try:
+                        if os.path.exists(task.local_path):
+                            os.remove(task.local_path)
+                            logger.info(f"上传完成，删除测试文件: {task.local_path}")
+                    except Exception as e:
+                        logger.error(f"删除测试文件失败: {e}")
+
                 logger.info(f"文件上传成功: {task.name}")
+                # 发送上传完成信号
+                self._notify_upload_complete(task)
             else:
-                task.status = "失败"
-                task.error_message = result.get('error', '上传失败')
-                logger.error(f"文件上传失败: {task.name}, 错误: {task.error_message}")
-                
+                error_message = result.get('error', '上传失败')
+                # 检查是否是暂停
+                if "暂停" in error_message:
+                    task.status = "已暂停"
+                    task.error_message = None
+                    logger.info(f"文件上传已暂停: {task.name}")
+                else:
+                    task.status = "失败"
+                    task.error_message = error_message
+                    logger.error(f"文件上传失败: {task.name}, 错误: {task.error_message}")
+
         except Exception as e:
             task.status = "失败"
             task.error_message = str(e)
-            logger.error(f"上传异常: {task.name}, 错误: {e}")
-    
+            logger.error(f"直接上传异常: {task.name}, 错误: {e}")
+
     def _upload_chunked(self, task: TransferTask):
         """分片上传大文件"""
         try:
@@ -138,81 +319,179 @@ class TransferManager:
             # 如果没有uploadid，先预上传
             if not task.uploadid:
                 precreate_result = self.api_client.precreate_file(
-                    remote_full_path, 
-                    task.size, 
+                    remote_full_path,
+                    task.size,
+                    task.local_path,  # 传入本地路径用于计算MD5
                     task.chunk_size
                 )
-                
+
                 if not precreate_result.get('success'):
                     task.status = "失败"
                     task.error_message = precreate_result.get('error', '预上传失败')
                     return
-                
-                task.uploadid = precreate_result['data']['uploadid']
-                self._save_resume_data(task)
+
+                # 从返回数据中获取信息
+                result_data = precreate_result.get('data', {})
+                uploadid = result_data.get('uploadid')
+                block_list = result_data.get('block_list_md5', [])
+
+                logger.info(f"预上传返回: uploadid={uploadid}")
+
+                # 情况1：有 uploadid，使用分片上传（支持断点续传）
+                if uploadid:
+                    task.uploadid = uploadid
+                    task.block_list_md5 = block_list
+
+                    # 保存断点续传数据（获取 uploadid 后立即保存，需要已登录）
+                    if self.current_user_uk:
+                        self._save_resume_data(task)
+                    else:
+                        # 未登录，添加到待保存列表
+                        if task not in self.pending_save_tasks:
+                            self.pending_save_tasks.append(task)
+
+                    logger.info(f"使用分片上传，支持断点续传: {task.name}")
+
+                # 情况2：没有 uploadid，使用单步上传（不支持断点续传）
+                else:
+                    logger.info(f"没有返回 uploadid，使用单步上传（不支持断点续传）: {task.name}")
+
+                    # 使用单步上传
+                    result = self.api_client.upload_file_simple(
+                        task.local_path,
+                        remote_full_path,
+                        task
+                    )
+
+                    if result.get('success'):
+                        task.status = "完成"
+                        task.progress = 100
+                        task.speed = 0
+
+                        # 检查是否因为重名而改变了文件名
+                        actual_name = result.get('actual_name')
+                        if actual_name and actual_name != task.name:
+                            logger.info(f"文件被重命名: {task.name} -> {actual_name}")
+                            task.name = actual_name
+
+                        logger.info(f"文件上传成功: {task.name}")
+                        # 发送上传完成信号
+                        self._notify_upload_complete(task)
+                        return
+                    else:
+                        error_message = result.get('error', '上传失败')
+                        # 检查是否是暂停
+                        if "暂停" in error_message:
+                            task.status = "已暂停"
+                            task.error_message = None
+                            logger.info(f"文件上传已暂停: {task.name}")
+                        else:
+                            task.status = "失败"
+                            task.error_message = error_message
+                            logger.error(f"文件上传失败: {task.name}, 错误: {task.error_message}")
+                        return
             
+            # 上传分片前，先获取一次上传域名（整个文件使用同一个域名）
+            upload_url = self.api_client.locate_upload_server(
+                remote_full_path,
+                task.uploadid
+            )
+
+            if not upload_url:
+                task.status = "失败"
+                task.error_message = "获取上传服务器失败"
+                logger.error(f"获取上传服务器失败: {task.name}")
+                return
+
+            logger.info(f"获取上传服务器成功: {upload_url}")
+
             # 上传分片
             with open(task.local_path, 'rb') as f:
                 for chunk_index in range(task.current_chunk, task.total_chunks):
-                    # 如果已取消或失败，停止上传
-                    if task.status in ["已取消", "失败", "已暂停"]:
+                    # 检查是否需要停止（通过stop_event或status）
+                    if task.stop_event.is_set() or task.status in ["已取消", "失败", "已暂停"]:
+                        logger.info(f"任务 {task.name} 被暂停/取消，停止上传")
+                        if task.status not in ["已取消", "失败"]:
+                            task.status = "已暂停"
                         break
-                    
+
                     # 如果分片已经上传过，跳过
                     if chunk_index in task.uploaded_chunks:
                         task.current_chunk = chunk_index + 1
                         task.progress = (chunk_index + 1) / task.total_chunks * 100
                         continue
-                    
+
                     # 读取分片数据
                     start = chunk_index * task.chunk_size
                     end = min((chunk_index + 1) * task.chunk_size, task.size)
                     f.seek(start)
                     chunk_data = f.read(end - start)
-                    
-                    # 上传分片
+
+                    # 上传分片前再次检查
+                    if task.stop_event.is_set():
+                        logger.info(f"任务 {task.name} 在上传分片前被暂停")
+                        task.status = "已暂停"
+                        break
+
+                    # 上传分片（使用同一个 upload_url）
                     start_time = time.time()
                     result = self.api_client.upload_slice(
+                        upload_url,  # 使用同一域名
                         remote_full_path,
                         task.uploadid,
                         chunk_data,
                         chunk_index,
                         task.total_chunks
                     )
-                    
+
                     if not result.get('success'):
                         task.status = "失败"
                         task.error_message = f"分片 {chunk_index + 1} 上传失败"
                         break
-                    
+
                     # 计算上传速度
                     upload_time = time.time() - start_time
                     if upload_time > 0:
                         task.speed = len(chunk_data) / upload_time
-                    
+
                     # 更新进度
                     task.uploaded_chunks.append(chunk_index)
                     task.current_chunk = chunk_index + 1
                     task.progress = task.current_chunk / task.total_chunks * 100
                     task.last_update_time = time.time()
-                    
-                    # 保存断点续传数据
-                    self._save_resume_data(task)
-                    
-                    logger.info(f"分片 {chunk_index + 1}/{task.total_chunks} 上传成功: {task.name}")
-            
+
+                    # 保存断点续传数据前检查是否被取消
+                    if not task.stop_event.is_set() and task.status not in ["已取消", "失败"]:
+                        self._save_resume_data(task)
+
             # 如果所有分片都上传完成，创建文件
             if len(task.uploaded_chunks) >= task.total_chunks:
-                create_result = self.api_client.create_file(remote_full_path, task.uploadid, task.size)
-                
+                create_result = self.api_client.create_file(
+                    remote_full_path,
+                    task.uploadid,
+                    task.size,
+                    block_list=task.block_list_md5
+                )
+
                 if create_result.get('success'):
                     task.status = "完成"
                     task.progress = 100
-                    
+
                     # 清除断点续传数据
                     self._clear_resume_data(task.task_id)
-                    
+
+                    # 如果是测试文件，删除本地临时文件
+                    if task.local_path and 'test_upload_' in os.path.basename(task.local_path):
+                        try:
+                            if os.path.exists(task.local_path):
+                                os.remove(task.local_path)
+                                logger.info(f"上传完成，删除测试文件: {task.local_path}")
+                        except Exception as e:
+                            logger.error(f"删除测试文件失败: {e}")
+
                     logger.info(f"分片上传完成: {task.name}")
+                    # 发送上传完成信号
+                    self._notify_upload_complete(task)
                 else:
                     task.status = "失败"
                     task.error_message = create_result.get('error', '创建文件失败')
@@ -227,8 +506,29 @@ class TransferManager:
                 self._save_resume_data(task)
     
     def _save_resume_data(self, task: TransferTask):
-        """保存断点续传数据"""
-        resume_data = {
+        """保存断点续传数据（一个用户一个文件，包含所有未完成的任务）"""
+        # 如果任务已取消或失败，不保存断点数据
+        if task.status in ["已取消", "失败"] or task.stop_event.is_set():
+            logger.info(f"任务已取消/失败，跳过保存断点续传数据: {task.name}")
+            return
+
+        if not self.current_user_uk:
+            logger.warning(f"未设置用户UK，无法保存断点续传数据: {task.name}")
+            return
+
+        resume_file = self._get_resume_file_path()
+
+        # 读取现有数据
+        all_tasks_data = {}
+        if resume_file and os.path.exists(resume_file):
+            try:
+                with open(resume_file, 'r', encoding='utf-8') as f:
+                    all_tasks_data = json.load(f)
+            except Exception as e:
+                logger.error(f"读取断点续传数据失败: {e}")
+
+        # 更新当前任务数据
+        task_data = {
             'task_id': task.task_id,
             'name': task.name,
             'local_path': task.local_path,
@@ -239,57 +539,214 @@ class TransferManager:
             'current_chunk': task.current_chunk,
             'uploaded_chunks': task.uploaded_chunks,
             'chunk_size': task.chunk_size,
+            'block_list_md5': task.block_list_md5,
             'progress': task.progress,
+            'status': task.status,
             'timestamp': time.time()
         }
-        
-        resume_file = self._get_resume_file_path(task.task_id)
+        all_tasks_data[str(task.task_id)] = task_data
+
+        # 保存所有任务数据
         try:
             with open(resume_file, 'w', encoding='utf-8') as f:
-                json.dump(resume_data, f, ensure_ascii=False, indent=2)
+                json.dump(all_tasks_data, f, ensure_ascii=False, indent=2)
+            logger.info(f"保存断点续传数据: {task.name}, 进度: {task.progress:.1f}%, 用户: {self.current_user_uk}")
         except Exception as e:
             logger.error(f"保存断点续传数据失败: {e}")
     
     def _load_resume_data(self, task_id):
-        """加载断点续传数据"""
-        resume_file = self._get_resume_file_path(task_id)
-        if os.path.exists(resume_file):
-            try:
-                with open(resume_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"加载断点续传数据失败: {e}")
+        """加载单个任务的断点续传数据（已废弃，保留用于兼容）"""
+        # 不再使用，改为读取所有任务
         return None
+
+    def _remove_task_from_resume_data(self, task_id):
+        """从断点续传数据中删除指定任务"""
+        if not self.current_user_uk:
+            return
+
+        resume_file = self._get_resume_file_path()
+        if not resume_file or not os.path.exists(resume_file):
+            return
+
+        try:
+            with open(resume_file, 'r', encoding='utf-8') as f:
+                all_tasks_data = json.load(f)
+
+            # 删除指定任务
+            if str(task_id) in all_tasks_data:
+                del all_tasks_data[str(task_id)]
+
+                # 如果还有任务，保存更新后的数据
+                if all_tasks_data:
+                    with open(resume_file, 'w', encoding='utf-8') as f:
+                        json.dump(all_tasks_data, f, ensure_ascii=False, indent=2)
+                else:
+                    # 如果没有任务了，删除文件
+                    os.remove(resume_file)
+
+                logger.info(f"从断点续传数据中删除任务: {task_id}")
+        except Exception as e:
+            logger.error(f"删除断点续传数据失败: {e}")
     
     def _clear_resume_data(self, task_id):
         """清除断点续传数据"""
-        resume_file = self._get_resume_file_path(task_id)
-        if os.path.exists(resume_file):
-            try:
-                os.remove(resume_file)
-            except Exception as e:
-                logger.error(f"清除断点续传数据失败: {e}")
+        self._remove_task_from_resume_data(task_id)
     
     def pause_task(self, task_id: int):
         """暂停任务"""
         task = self.get_task(task_id)
-        if task and task.status == "分片上传中":
+        if task and task.status in ["上传中", "下载中", "分片上传中"]:
+            task.stop_event.set()  # 设置停止标志
             task.status = "已暂停"
-            self._save_resume_data(task)
-    
+
+            # 保存断点续传数据（如果已登录且有uploadid）
+            if self.current_user_uk and task.uploadid:
+                self._save_resume_data(task)
+                logger.info(f"保存断点续传数据（暂停时）: {task.name}")
+
+            logger.info(f"任务 {task.name} 已暂停")
+
     def resume_task(self, task_id: int):
         """继续任务"""
         task = self.get_task(task_id)
-        if task and task.status == "已暂停":
+        if task and task.status in ["已暂停", "已暂停（可断点续传）", "等待中"]:
+            # 创建新的 stop_event，确保是未设置状态
+            task.stop_event = Event()
             self.start_upload(task)
+            logger.info(f"任务 {task.name} 已继续")
     
     def cancel_task(self, task_id: int):
         """取消任务"""
         task = self.get_task(task_id)
         if task:
+            # 先停止任务
+            if task.status in ["上传中", "下载中", "分片上传中", "等待中"]:
+                task.stop_event.set()
+                logger.info(f"停止任务: {task.name}")
+
             task.status = "已取消"
             self._clear_resume_data(task_id)
     
+    def resume_incomplete_tasks(self):
+        """恢复未完成的任务（在登录成功后调用）"""
+        if not self.current_user_uk:
+            logger.warning("未设置用户UK，无法恢复未完成任务")
+            return
+
+        if self.tasks_loaded:
+            return  # 已经加载过了
+
+        logger.info(f"开始恢复用户 {self.current_user_uk} 的未完成任务...")
+        resumed_count = 0
+        invalid_count = 0
+
+        # 获取当前用户的断点续传文件
+        resume_file = self._get_resume_file_path()
+        if not resume_file or not os.path.exists(resume_file):
+            logger.info(f"未找到用户 {self.current_user_uk} 的断点续传数据")
+            self.tasks_loaded = True
+            return
+
+        try:
+            with open(resume_file, 'r', encoding='utf-8') as f:
+                all_tasks_data = json.load(f)
+
+            logger.info(f"找到 {len(all_tasks_data)} 个未完成任务")
+
+            # 遍历所有任务
+            for task_id_str, resume_data in all_tasks_data.items():
+                try:
+                    task_id = int(task_id_str)
+
+                    # 检查 uploadid 是否有效
+                    uploadid = resume_data.get('uploadid')
+                    if uploadid:
+                        import re
+                        if re.match(r'^[a-f0-9]{16}-\d+$', uploadid):
+                            logger.warning(f"检测到无效的临时 uploadid，删除任务: {task_id}")
+                            invalid_count += 1
+                            continue
+
+                    # 检查本地文件是否存在
+                    local_path = resume_data.get('local_path')
+                    if not local_path or not os.path.exists(local_path):
+                        logger.warning(f"本地文件不存在，跳过恢复: {local_path}")
+                        invalid_count += 1
+                        # 继续处理，不要删除，等循环结束后统一清理
+                        continue
+
+                    # 创建新任务
+                    self.task_id_counter = max(self.task_id_counter, task_id)
+                    task = TransferTask(
+                        task_id=task_id,
+                        name=resume_data['name'],
+                        remote_path=resume_data['remote_path'],
+                        size=resume_data['size'],
+                        type='upload',
+                        local_path=local_path
+                    )
+
+                    # 恢复任务状态
+                    task.uploadid = uploadid
+                    task.total_chunks = resume_data.get('total_chunks', 0)
+                    task.current_chunk = resume_data.get('current_chunk', 0)
+                    task.uploaded_chunks = resume_data.get('uploaded_chunks', [])
+                    task.chunk_size = resume_data.get('chunk_size', 0)
+                    task.block_list_md5 = resume_data.get('block_list_md5', [])
+                    task.progress = resume_data.get('progress', 0)
+                    task.status = "已暂停（可断点续传）"
+
+                    # 添加到任务列表
+                    self.tasks.append(task)
+                    resumed_count += 1
+
+                    logger.info(f"恢复任务: {task.name}, 进度: {task.progress:.1f}% ({len(task.uploaded_chunks)}/{task.total_chunks} 分片)")
+
+                except Exception as e:
+                    logger.error(f"恢复任务失败: {task_id_str}, 错误: {e}")
+
+            # 清理无效任务
+            if invalid_count > 0:
+                logger.info(f"清理 {invalid_count} 个无效任务...")
+                self._clean_invalid_tasks(all_tasks_data)
+
+        except Exception as e:
+            logger.error(f"加载断点续传数据失败: {e}")
+
+        self.tasks_loaded = True
+        logger.info(f"任务恢复完成，共恢复 {resumed_count} 个未完成任务，清除 {invalid_count} 个无效任务")
+
+    def _clean_invalid_tasks(self, all_tasks_data):
+        """清理无效的任务（文件不存在的任务）"""
+        if not self.current_user_uk:
+            return
+
+        valid_tasks = {}
+        for task_id_str, resume_data in all_tasks_data.items():
+            local_path = resume_data.get('local_path')
+            if local_path and os.path.exists(local_path):
+                # 文件存在，保留
+                valid_tasks[task_id_str] = resume_data
+            else:
+                logger.info(f"清理无效任务: {task_id_str}")
+
+        # 保存清理后的数据
+        resume_file = self._get_resume_file_path()
+        if valid_tasks:
+            try:
+                with open(resume_file, 'w', encoding='utf-8') as f:
+                    json.dump(valid_tasks, f, ensure_ascii=False, indent=2)
+                logger.info(f"清理后保存 {len(valid_tasks)} 个有效任务")
+            except Exception as e:
+                logger.error(f"保存清理后的数据失败: {e}")
+        else:
+            # 所有任务都无效，删除文件
+            try:
+                os.remove(resume_file)
+                logger.info(f"所有任务都无效，删除断点续传文件")
+            except Exception as e:
+                logger.error(f"删除断点续传文件失败: {e}")
+
     def get_task(self, task_id: int) -> Optional[TransferTask]:
         """获取任务"""
         for task in self.tasks:
@@ -304,10 +761,17 @@ class TransferManager:
         return self.tasks
     
     def remove_task(self, task_id: int) -> Optional[TransferTask]:
-        """移除任务"""
+        """移除任务（包括删除断点续传数据）"""
         for i, task in enumerate(self.tasks):
             if task.task_id == task_id:
+                # 先停止任务
+                if task.status in ["上传中", "下载中", "分片上传中", "等待中"]:
+                    task.status = "已取消"
+                    task.stop_event.set()  # 停止上传线程
+                    logger.info(f"停止任务: {task.name}")
+
                 # 清除断点续传数据
                 self._clear_resume_data(task_id)
+
                 return self.tasks.pop(i)
         return None

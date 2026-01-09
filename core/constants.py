@@ -17,7 +17,44 @@ class APIConstants:
 # 文件上传相关常量
 class UploadConstants:
     """文件上传相关常量"""
-    CHUNK_SIZE = 4 * 1024 * 1024  # 分片大小：4MB（百度网盘推荐）
+    # 不再使用直接上传，所有文件都分片上传
+    # 取消 DIRECT_UPLOAD_THRESHOLD
+
+    # 百度API限制
+    MAX_CHUNKS = 1024  # 分片数量不得超过1024个
+
+    # 不同会员类型的分片配置
+    # 格式: '会员类型': {'max_chunk_size': 最大分片大小, 'max_file_size': 文件大小上限, 'name': '名称'}
+    MEMBER_TYPE_CONFIG = {
+        'normal': {
+            'max_chunk_size': 4 * 1024 * 1024,  # 普通用户：最大4MB
+            'max_file_size': 4 * 1024 * 1024 * 1024,  # 4GB
+            'name': '普通用户'
+        },
+        'vip': {
+            'max_chunk_size': 16 * 1024 * 1024,  # 普通会员：最大16MB
+            'max_file_size': 10 * 1024 * 1024 * 1024,  # 10GB
+            'name': '普通会员'
+        },
+        'super_vip': {
+            'max_chunk_size': 32 * 1024 * 1024,  # 超级会员：最大32MB
+            'max_file_size': 20 * 1024 * 1024 * 1024,  # 20GB
+            'name': '超级会员'
+        }
+    }
+
+    # 动态分片配置
+    SMALL_FILE_THRESHOLD = 500 * 1024 * 1024  # 500MB
+    MEDIUM_FILE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5GB
+
+    # 小文件使用小分片，快速响应暂停
+    SMALL_FILE_CHUNK_SIZE = 256 * 1024  # 256KB
+
+    # 中等文件的默认分片大小
+    MEDIUM_FILE_CHUNK_SIZE = 1 * 1024 * 1024  # 1MB
+
+    # 默认使用普通用户配置
+    CHUNK_SIZE = MEMBER_TYPE_CONFIG['normal']['max_chunk_size']
     LARGE_FILE_THRESHOLD = 100 * 1024 * 1024  # 大文件阈值：100MB
     MAX_RETRIES = 3  # 最大重试次数
 

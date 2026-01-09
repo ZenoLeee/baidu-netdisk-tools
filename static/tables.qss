@@ -1,0 +1,85 @@
+/* ========================================
+   表格样式
+   ======================================== */
+
+/* 表格基础样式 */
+QTableWidget {
+    border-radius: 8px;
+    background-color: white;
+    alternate-background-color: #fafafa;
+    selection-background-color: #e3f2fd;
+    selection-color: #1565C0;
+    gridline-color: #f0f0f0;
+    border: 1px solid #e8e8e8;
+}
+
+QTableWidget::item {
+    border-bottom: 1px solid #f0f0f0;
+    padding: 10px 6px;
+}
+
+QTableWidget::item:selected {
+    background-color: #e3f2fd;
+    color: #1565C0;
+}
+
+QHeaderView::section {
+    background-color: #f8f9fa;
+    padding: 10px 6px;
+    border: none;
+    border-bottom: 2px solid #e0e0e0;
+    border-right: 1px solid #f0f0f0;
+    font-weight: 600;
+    font-size: 12px;
+    color: #444;
+    min-height: 35px;
+}
+
+/* 传输表格特殊样式 */
+QTableWidget#transferTable {
+    font-size: 12px;
+}
+
+QTableWidget#transferTable::item {
+    padding: 4px;
+}
+
+QTableWidget#transTable {
+
+}
+
+/* 拖拽高亮样式 */
+QTableWidget#dragHighlight {
+    border: 2px dashed #2196F3;
+    background-color: rgba(33, 150, 243, 0.1);
+}
+
+/* 账号列表样式 */
+QListWidget#accountList {
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    padding: 5px;
+    background-color: white;
+    outline: none;
+    /* 明确禁用交替行颜色 */
+    alternate-background-color: white;
+}
+
+/* 账号列表项基础样式 */
+QListWidget#accountList::item {
+    padding: 12px;
+    border-radius: 3px;
+    font-size: 13px;
+    background-color: white;
+}
+
+/* 账号列表项悬停效果 */
+QListWidget#accountList::item:hover {
+    background-color: #f0f0f0;
+}
+
+/* 可选择的账号项选中效果 */
+QListWidget#accountList::item:selected {
+    background-color: #2196F3;
+    color: white;
+}

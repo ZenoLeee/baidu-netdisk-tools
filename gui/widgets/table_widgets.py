@@ -63,12 +63,8 @@ class DragDropTableWidget(AutoTooltipTableWidget):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
             self.drag_active = True
-            self.setStyleSheet("""
-                QTableWidget {
-                    border: 2px dashed #2196F3;
-                    background-color: rgba(33, 150, 243, 0.1);
-                }
-            """)
+            from gui.style import AppStyles
+            self.setStyleSheet(AppStyles.get_drag_highlight_style())
         else:
             event.ignore()
 
