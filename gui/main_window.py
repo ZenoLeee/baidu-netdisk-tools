@@ -26,6 +26,7 @@ from core.constants import AppConstants, UploadConstants, UIConstants
 
 # 从新模块导入
 from core.transfer_manager import TransferManager
+from core.version_manager import VersionManager, UpdateDialog
 from utils.worker import Worker
 from gui.widgets.table_widgets import DragDropTableWidget
 from gui.transfer_page import TransferPage
@@ -58,6 +59,9 @@ class MainWindow(QMainWindow):
 
         # 传输管理器
         self.transfer_manager = TransferManager()
+
+        # 版本管理器
+        self.version_manager = VersionManager()
 
         # 扫描相关
         self.current_worker = None  # 当前工作线程
@@ -2101,6 +2105,9 @@ class MainWindow(QMainWindow):
 
         self.user_info_widget.setVisible(True)
 
+        # 登录成功后，延迟检查更新（避免阻塞登录流程）
+        QTimer.singleShot(1000, lambda: self.check_for_updates(auto_check=True))
+
         # 更新状态栏
         self.status_label.setText(f"已登录: {self.current_account}")
 
@@ -2507,6 +2514,13 @@ class MainWindow(QMainWindow):
 
         # 帮助菜单
         help_menu = menubar.addMenu('帮助(&H)')
+
+        check_update_action = QAction('检查更新(&U)', self)
+        check_update_action.triggered.connect(self.check_for_updates)
+        help_menu.addAction(check_update_action)
+
+        help_menu.addSeparator()
+
         about_action = QAction('关于(&A)', self)
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
@@ -2614,14 +2628,50 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout(dialog)
 
-        label = QLabel('''
-        百度网盘管理工具箱
-        版本: 1.0
-        作者: Zeno
+        label = QLabel(f'''
+        <h2>百度网盘管理工具箱</h2>
+        <p>版本: {self.version_manager.get_current_version()}</p>
+        <p>一个简单易用的百度网盘管理工具</p>
+        <p>支持文件上传、下载、断点续传等功能</p>
         ''')
+        label.setAlignment(Qt.AlignCenter)
         layout.addWidget(label)
 
         dialog.exec_()
+
+    def check_for_updates(self, auto_check=False):
+        """
+        检查更新
+
+        Args:
+            auto_check: 是否为自动检查（启动时）
+        """
+        try:
+            has_update, latest_version, changelog, force_update = self.version_manager.check_for_updates()
+
+            if has_update:
+                # 有新版本，显示更新对话框
+                dialog = UpdateDialog(
+                    self,
+                    self.version_manager,
+                    has_update,
+                    latest_version,
+                    changelog,
+                    force_update
+                )
+                dialog.exec_()
+            else:
+                # 没有更新
+                if not auto_check:
+                    QMessageBox.information(
+                        self,
+                        "检查更新",
+                        f"当前已是最新版本\n\n版本号：{self.version_manager.get_current_version()}"
+                    )
+        except Exception as e:
+            logger.error(f"检查更新失败: {e}")
+            if not auto_check:
+                QMessageBox.warning(self, "检查更新", f"检查更新失败：{str(e)}")
 
     def show_status_progress(self, message="正在处理..."):
         self.status_label.setText(message)
