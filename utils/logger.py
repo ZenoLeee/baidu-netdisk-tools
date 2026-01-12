@@ -3,6 +3,18 @@
 """
 import logging
 import sys
+import os
+
+
+# 获取运行目录（程序所在目录）
+def get_runtime_dir():
+    """获取程序运行目录"""
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的exe
+        return os.path.dirname(sys.executable)
+    else:
+        # 如果是直接运行py文件
+        return os.path.dirname(os.path.abspath(__file__))
 
 
 class ColorFormatter(logging.Formatter):
@@ -54,8 +66,9 @@ def get_logger(name: str = None, level: int = logging.INFO) -> logging.Logger:
         console_handler.setFormatter(ColorFormatter())
         logger.addHandler(console_handler)
 
-        # 文件处理器 - 使用普通格式化器
-        file_handler = logging.FileHandler('baidu_pan_tool.log', encoding='utf-8')
+        # 文件处理器 - 使用普通格式化器，日志文件保存在运行目录下
+        log_file = os.path.join(get_runtime_dir(), 'baidu_pan_tool.log')
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(
             logging.Formatter(

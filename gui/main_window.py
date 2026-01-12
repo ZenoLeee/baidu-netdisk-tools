@@ -2498,11 +2498,114 @@ class MainWindow(QMainWindow):
         # 更新菜单栏
         self.menuBar().setNativeMenuBar(False)  # Windows 系统需要禁用原生菜单栏
 
+        # 设置菜单
+        settings_menu = menubar.addMenu('设置(&S)')
+
+        download_path_action = QAction('设置下载目录(&D)', self)
+        download_path_action.triggered.connect(self.show_download_path_dialog)
+        settings_menu.addAction(download_path_action)
+
         # 帮助菜单
         help_menu = menubar.addMenu('帮助(&H)')
         about_action = QAction('关于(&A)', self)
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
+
+    def show_download_path_dialog(self):
+        """显示设置下载目录对话框"""
+        # 获取当前下载目录
+        current_path = self.config.get_download_path()
+
+        # 创建对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle('设置下载目录')
+        dialog.setFixedSize(500, 150)
+
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(15)
+
+        # 说明标签
+        info_label = QLabel('请选择默认的文件下载目录:')
+        layout.addWidget(info_label)
+
+        # 路径显示和选择区域
+        path_layout = QHBoxLayout()
+
+        self.path_input = QLineEdit(current_path)
+        self.path_input.setReadOnly(True)
+        path_layout.addWidget(self.path_input)
+
+        browse_btn = QPushButton('浏览...')
+        browse_btn.clicked.connect(lambda: self.browse_download_folder(dialog))
+        browse_btn.setMinimumWidth(80)
+        path_layout.addWidget(browse_btn)
+
+        layout.addLayout(path_layout)
+
+        # 按钮区域
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        cancel_btn = QPushButton('取消')
+        cancel_btn.setMinimumWidth(80)
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+
+        save_btn = QPushButton('保存')
+        save_btn.setObjectName('authbut')
+        save_btn.setMinimumWidth(80)
+        save_btn.clicked.connect(lambda: self.save_download_path(dialog))
+        button_layout.addWidget(save_btn)
+
+        layout.addLayout(button_layout)
+
+        dialog.exec_()
+
+    def browse_download_folder(self, dialog):
+        """浏览并选择下载文件夹"""
+        current_path = self.path_input.text()
+        folder_path = QFileDialog.getExistingDirectory(
+            dialog,
+            '选择下载目录',
+            current_path
+        )
+
+        if folder_path:
+            self.path_input.setText(folder_path)
+
+    def save_download_path(self, dialog):
+        """保存下载目录设置"""
+        new_path = self.path_input.text().strip()
+
+        if not new_path:
+            QMessageBox.warning(dialog, '警告', '下载目录不能为空')
+            return
+
+        # 检查目录是否存在
+        if not os.path.exists(new_path):
+            reply = QMessageBox.question(
+                dialog,
+                '目录不存在',
+                f'目录 "{new_path}" 不存在，是否创建？',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+
+            if reply == QMessageBox.Yes:
+                try:
+                    os.makedirs(new_path)
+                except Exception as e:
+                    QMessageBox.critical(dialog, '错误', f'创建目录失败: {str(e)}')
+                    return
+            else:
+                return
+
+        # 保存设置
+        if self.config.set_download_path(new_path):
+            self.status_label.setText(f'下载目录已设置为: {new_path}')
+            dialog.accept()
+        else:
+            QMessageBox.critical(dialog, '错误', '保存下载目录失败')
 
     def show_about_dialog(self):
         dialog = QDialog(self)

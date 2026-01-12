@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import sys
 import threading
 from typing import List, Dict, Any, Optional
 from queue import Queue
@@ -12,6 +13,17 @@ from utils.logger import get_logger
 from core.constants import UploadConstants
 
 logger = get_logger(__name__)
+
+
+# 获取运行目录（程序所在目录）
+def get_runtime_dir():
+    """获取程序运行目录"""
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的exe
+        return os.path.dirname(sys.executable)
+    else:
+        # 如果是直接运行py文件，使用项目根目录
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 @dataclass
 class TransferTask:
@@ -61,7 +73,8 @@ class TransferManager:
         self.tasks: List[TransferTask] = []
         self.task_id_counter = 0
         self.api_client = BaiduPanAPI()
-        self.resume_data_dir = "resume_data"
+        # 断点续传数据目录保存在运行目录下
+        self.resume_data_dir = os.path.join(get_runtime_dir(), "resume_data")
         self._ensure_resume_dir()
         self.upload_complete_callback = None  # 上传完成回调函数
         self.current_user_uk = None  # 当前登录用户的 UK

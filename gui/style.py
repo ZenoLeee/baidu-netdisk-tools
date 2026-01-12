@@ -2,6 +2,7 @@
 样式表管理器 - 模块化加载多个QSS文件
 """
 import os
+import sys
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,13 +22,29 @@ class AppStyles:
     ]
 
     @staticmethod
+    def _get_static_dir():
+        """
+        获取 static 文件夹的路径
+        支持开发环境和打包后的环境
+        """
+        # PyInstaller 打包后，资源文件在 sys._MEIPASS 目录下
+        if getattr(sys, 'frozen', False):
+            # 打包后的exe
+            base_dir = sys._MEIPASS
+        else:
+            # 开发环境
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        return os.path.join(base_dir, 'static')
+
+    @staticmethod
     def get_stylesheet() -> str:
         """
         获取应用程序完整样式表
         按顺序加载所有QSS文件并合并
         """
         qss_parts = []
-        static_dir = os.path.join(os.getcwd(), 'static')
+        static_dir = AppStyles._get_static_dir()
 
         for qss_file in AppStyles.QSS_FILES:
             file_path = os.path.join(static_dir, qss_file)

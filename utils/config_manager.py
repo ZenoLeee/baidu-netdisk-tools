@@ -3,6 +3,8 @@
 """
 import json
 import time
+import sys
+import os
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
@@ -10,6 +12,17 @@ from utils.logger import get_logger
 from core.constants import TimeConstants
 
 logger = get_logger(__name__)
+
+
+# 获取运行目录（程序所在目录）
+def get_runtime_dir():
+    """获取程序运行目录"""
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的exe
+        return os.path.dirname(sys.executable)
+    else:
+        # 如果是直接运行py文件，使用项目根目录
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # 默认配置常量
@@ -29,7 +42,9 @@ class ConfigManager:
     """配置管理器"""
 
     def __init__(self, config_file: str = 'config.json'):
-        self.config_file = Path(config_file)
+        # 配置文件保存在运行目录下
+        config_path = os.path.join(get_runtime_dir(), config_file)
+        self.config_file = Path(config_path)
         self.config = self._load_config()
 
     def _load_config(self) -> Dict[str, Any]:
