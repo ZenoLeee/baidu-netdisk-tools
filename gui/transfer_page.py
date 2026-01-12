@@ -131,6 +131,7 @@ class TransferPage(QWidget):
         download_menu = QMenu(self)
         download_menu.addAction("下载 requirements.txt", lambda: self.test_download_file("/requirements.txt"))
         download_menu.addAction("下载 test.mp3", lambda: self.test_download_file("/test.mp3"))
+        download_menu.addAction("下载 test_upload_967z8qnx.dat", lambda: self.test_download_file("/test_upload_967z8qnx.dat"))
         self.test_download_btn.setMenu(download_menu)
         top_layout.addWidget(self.test_download_btn)
 
@@ -670,9 +671,41 @@ class TransferPage(QWidget):
         # 从路径中提取文件名
         file_name = os.path.basename(remote_path)
 
+        # 对于特定的测试文件，如果不存在则先创建并上传
+        if file_name == "test_upload_967z8qnx.dat":
+            # 检查文件是否存在于网盘中
+            api_client = self.parent_window.api_client
+            parent_dir = os.path.dirname(remote_path)
+            file_list = api_client.list_files(parent_dir if parent_dir else '/')
+
+            file_exists = False
+            for f in file_list:
+                if f.get('server_filename') == file_name or f.get('path') == remote_path:
+                    file_exists = True
+                    logger.info(f"测试文件已存在于网盘: {file_name}")
+                    break
+
+            if not file_exists:
+                logger.info(f"测试文件不存在，将创建并上传: {file_name}")
+                reply = QMessageBox.question(
+                    self,
+                    "创建测试文件",
+                    f"网盘中不存在文件 {file_name}。\n是否先创建并上传该文件（约10MB）？",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+
+                if reply == QMessageBox.Yes:
+                    # 创建10MB测试文件并上传
+                    self.create_and_upload_test_file(file_name, remote_path, 10)
+                    # 等待上传完成后，再添加下载任务
+                    return
+                else:
+                    # 用户选择不创建，直接尝试下载（会失败）
+                    pass
+
         # 获取默认下载路径（从配置中读取）
         config = ConfigManager()
-        default_download_dir = config.get_default_download_path()
+        default_download_dir = config.get_download_path()
 
         logger.info(f"=" * 50)
         logger.info(f"测试下载: {file_name}")
@@ -725,3 +758,46 @@ class TransferPage(QWidget):
             import traceback
             traceback.print_exc()
             QMessageBox.warning(self, "错误", f"测试下载失败: {str(e)}")
+
+    def create_and_upload_test_file(self, file_name, remote_path, size_mb):
+        """创建并上传测试文件
+
+        Args:
+            file_name: 文件名
+            remote_path: 远程路径
+            size_mb: 文件大小（MB）
+        """
+        import tempfile
+
+        try:
+            # 获取临时目录
+            temp_dir = tempfile.gettempdir()
+            temp_file_path = os.path.join(temp_dir, file_name)
+
+            # 创建指定大小的测试文件
+            file_size = size_mb * 1024 * 1024
+            with open(temp_file_path, 'wb') as f:
+                # 写入测试数据
+                chunk_size = 1024 * 1024  # 1MB
+                for i in range(file_size // chunk_size):
+                    f.write(os.urandom(chunk_size))
+
+            logger.info(f"创建测试文件: {temp_file_path}, 大小: {file_size} bytes")
+
+            # 添加上传任务
+            task = self.add_upload_task(temp_file_path, "/")
+
+            if task:
+                logger.info(f"✅ 测试文件已创建并添加到上传任务")
+                QMessageBox.information(
+                    self,
+                    "上传中",
+                    f"测试文件 {file_name} 已创建并开始上传。\n上传完成后，请手动点击下载按钮测试下载功能。"
+                )
+            else:
+                QMessageBox.warning(self, "错误", "添加测试上传任务失败")
+
+        except Exception as e:
+            logger.error(f"创建测试文件失败: {e}")
+            QMessageBox.warning(self, "错误", f"创建测试文件失败: {str(e)}")
+

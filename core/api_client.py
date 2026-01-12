@@ -1195,21 +1195,43 @@ class BaiduPanAPI:
                 return {'success': True, 'local_path': local_path, 'size': downloaded_size}
 
             last_update_time = time.time()
+            last_downloaded_size = downloaded_size  # 记录上次更新时的已下载大小，用于计算速度
 
             # 写入文件（追加模式或覆盖模式）
             mode = 'ab' if downloaded_size > 0 and response.status_code == 206 else 'wb'
             with open(local_path, mode) as f:
                 for chunk in response.iter_content(chunk_size=8192):
+                    # 检查是否需要暂停
+                    if task and task.stop_event.is_set():
+                        logger.info(f"检测到暂停信号，停止下载: {local_path}, 已下载: {downloaded_size} bytes")
+                        return {'success': False, 'error': '用户暂停下载', 'paused': True, 'downloaded_size': downloaded_size}
+
                     if chunk:
                         f.write(chunk)
                         downloaded_size += len(chunk)
 
-                        # 更新进度（每0.5秒更新一次）
+                        # 更新进度和速度（每0.5秒更新一次）
                         current_time = time.time()
                         if task and current_time - last_update_time >= 0.5:
+                            # 计算下载速度
+                            time_elapsed = current_time - last_update_time
+                            bytes_downloaded = downloaded_size - last_downloaded_size
+
+                            if time_elapsed > 0:
+                                current_speed = bytes_downloaded / time_elapsed
+                                # 使用加权平均更新速度（新速度占20%，旧速度占80%）
+                                if task.speed > 0:
+                                    task.speed = task.speed * 0.8 + current_speed * 0.2
+                                else:
+                                    task.speed = current_speed
+
+                            # 更新进度
                             if total_size > 0:
                                 task.progress = (downloaded_size / total_size) * 100
+
+                            # 更新记录
                             last_update_time = current_time
+                            last_downloaded_size = downloaded_size
 
             # 更新最终进度
             if task:

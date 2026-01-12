@@ -21,7 +21,7 @@ DEFAULT_CONFIG = {
     'redirect_uri': 'http://8.138.162.11:8939/',
     'accounts': {},
     'current_account': None,
-    'default_download_path': os.path.join(os.path.expanduser("~"), "Downloads"),  # 默认下载路径改为 Downloads 文件夹
+    'download_path': os.path.join(os.path.expanduser("~"), "Downloads"),  # 默认下载路径
 }
 
 
@@ -274,15 +274,15 @@ class ConfigManager:
         return None
 
     # 下载路径管理方法
-    def get_default_download_path(self) -> str:
+    def get_download_path(self) -> str:
         """获取默认下载路径
 
         Returns:
             默认下载路径
         """
-        return self.get('default_download_path', os.path.join(os.path.expanduser("~"), "Downloads"))
+        return self.get('download_path', os.path.join(os.path.expanduser("~"), "Downloads"))
 
-    def set_default_download_path(self, path: str) -> bool:
+    def set_download_path(self, path: str) -> bool:
         """设置默认下载路径
 
         Args:
@@ -291,5 +291,5 @@ class ConfigManager:
         Returns:
             设置是否成功
         """
-        self.set('default_download_path', path)
+        self.set('download_path', path)
         return self.save()

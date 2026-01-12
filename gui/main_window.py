@@ -44,6 +44,10 @@ class MainWindow(QMainWindow):
         self.is_switching_account = False
         # 文件加载标志
         self.is_loading_files = False
+        # 操作进行中标志（用于防止操作冲突）
+        self.is_operation_in_progress = False
+        # 操作队列（用于等待当前操作完成后执行）
+        self.operation_queue = []
 
         # 初始化组件
         self.original_text = None  # 存储原始文本
@@ -319,32 +323,32 @@ class MainWindow(QMainWindow):
         button_layout.setSpacing(10)
 
         # 上传按钮
-        upload_btn = QPushButton("📤 上传")
-        upload_btn.setObjectName("uploadBtn")
-        upload_btn.setMaximumWidth(80)
-        upload_btn.clicked.connect(self.upload_file)
-        button_layout.addWidget(upload_btn)
+        self.upload_btn = QPushButton("📤 上传")
+        self.upload_btn.setObjectName("uploadBtn")
+        self.upload_btn.setMaximumWidth(80)
+        self.upload_btn.clicked.connect(self.upload_file)
+        button_layout.addWidget(self.upload_btn)
 
         # 下载按钮
-        download_btn = QPushButton("📥 下载")
-        download_btn.setObjectName("authbut")
-        download_btn.setMaximumWidth(80)
-        download_btn.clicked.connect(self.download_selected_file)
-        button_layout.addWidget(download_btn)
+        self.download_btn = QPushButton("📥 下载")
+        self.download_btn.setObjectName("authbut")
+        self.download_btn.setMaximumWidth(80)
+        self.download_btn.clicked.connect(self.download_selected_file)
+        button_layout.addWidget(self.download_btn)
 
         # 新建文件夹按钮
-        create_folder_btn = QPushButton("📁 新建文件夹")
-        create_folder_btn.setObjectName("createDir")
-        create_folder_btn.setMaximumWidth(115)
-        create_folder_btn.clicked.connect(self.create_folder_dialog)
-        button_layout.addWidget(create_folder_btn)
+        self.create_folder_btn = QPushButton("📁 新建文件夹")
+        self.create_folder_btn.setObjectName("createDir")
+        self.create_folder_btn.setMaximumWidth(115)
+        self.create_folder_btn.clicked.connect(self.create_folder_dialog)
+        button_layout.addWidget(self.create_folder_btn)
 
         # 刷新按钮
-        refresh_btn = QPushButton("🔄 刷新")
-        refresh_btn.setObjectName("info")
-        refresh_btn.setMaximumWidth(80)
-        refresh_btn.clicked.connect(lambda: self.update_items(self.current_path))
-        button_layout.addWidget(refresh_btn)
+        self.refresh_btn = QPushButton("🔄 刷新")
+        self.refresh_btn.setObjectName("info")
+        self.refresh_btn.setMaximumWidth(80)
+        self.refresh_btn.clicked.connect(lambda: self.update_items(self.current_path))
+        button_layout.addWidget(self.refresh_btn)
 
         # 添加到按钮区域
         user_info_container_layout.addWidget(button_widget)
@@ -718,7 +722,7 @@ class MainWindow(QMainWindow):
 
         # 获取默认下载路径
         config = ConfigManager()
-        default_download_dir = config.get_default_download_path()
+        default_download_dir = config.get_download_path()
 
         # 确保目录存在
         if not os.path.exists(default_download_dir):
@@ -1258,6 +1262,9 @@ class MainWindow(QMainWindow):
         self.show_status_progress(f"正在加载: {path}")
         self.update_breadcrumb(path)
 
+        # 禁用所有按钮
+        self._set_transfer_buttons_enabled(False)
+
         self.current_worker = Worker(
             func=self.api_client.list_files,
             path=path
@@ -1268,8 +1275,8 @@ class MainWindow(QMainWindow):
 
     def show_file_table_menu(self, position):
         """显示文件表格的右键菜单"""
-        # 检查是否正在加载文件或切换账号
-        if self.is_loading_files or self.is_switching_account:
+        # 检查是否正在加载文件或切换账号或有操作正在进行
+        if self.is_loading_files or self.is_switching_account or self.is_operation_in_progress:
             return
 
         item = self.file_table.itemAt(position)
@@ -1306,14 +1313,39 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"已复制: {text[:30]}...")
 
     def rename_file(self, item=None):
-        """重命名文件"""
+        """重命名文件（只选中文件名，不包括扩展名）"""
         item = item or self.file_table.currentItem()
         if item is None:
             return
 
         self.renaming_item = item
         self.original_text = item.text()
+
+        # 分离文件名和扩展名（只记录信息，不修改显示）
+        text = item.text()
+        if '.' in text and not text.startswith('.'):
+            # 有扩展名，记录扩展名位置
+            last_dot = text.rfind('.')
+            self.original_ext = text[last_dot:]  # 包含点号
+            self.name_length = last_dot  # 文件名部分的长度
+        else:
+            # 没有扩展名或者是隐藏文件
+            self.original_ext = ''
+            self.name_length = len(text)
+
+        # 直接进入编辑模式，保持完整文本显示
         self.file_table.editItem(item)
+
+        # 使用 QTimer 延迟选中，确保编辑器已经创建
+        QTimer.singleShot(0, self._select_file_name_part)
+
+    def _select_file_name_part(self):
+        """选中文件名部分（不包括扩展名）"""
+        editor = self.file_table.focusWidget()
+        if editor and hasattr(editor, 'setSelection'):
+            # 只选中文件名部分
+            editor.setSelection(0, self.name_length)
+
 
     def on_item_changed(self, item):
         """处理单元格内容变化"""
@@ -1464,10 +1496,24 @@ class MainWindow(QMainWindow):
         if self.renaming_item != item:
             return
 
-        new_text = item.text().strip()
-        if new_text == self.original_text:
+        edited_text = item.text().strip()
+
+        # 直接使用用户编辑的文本，不做任何自动拼接
+        # 用户改什么就是什么
+        full_new_name = edited_text
+
+        logger.info(f"用户编辑文件名: '{self.original_text}' → '{full_new_name}'")
+
+        # 检查是否真的有变化
+        if full_new_name == self.original_text:
             self.renaming_item = self.original_text = None
+            logger.info(f"文件名未变化，取消重命名")
             return
+
+        logger.info(f"准备重命名: '{self.original_text}' → '{full_new_name}'")
+
+        # 保存完整的新文件名，供后续使用
+        self.full_new_name = full_new_name
 
         values = []
         for i in range(self.file_table.rowCount()):
@@ -1478,22 +1524,35 @@ class MainWindow(QMainWindow):
                 continue
             values.append(current_item.text().strip())
 
-        if new_text.strip() in values:
+        if full_new_name in values:
             item_obj = self.file_table.item(item.row(), item.column())
             rect = self.file_table.visualItemRect(item_obj)
             global_pos = self.file_table.viewport().mapToGlobal(rect.topLeft())
             QTimer.singleShot(100, lambda: self.show_tooltip(
-                global_pos, f'"{new_text}" 已存在',
+                global_pos, f'"{full_new_name}" 已存在',
                 self.file_table,
                 self.file_table.visualRect(self.file_table.indexFromItem(item))
             ))
-            item.setText(self.original_text)
+            # 延迟恢复原始文件名，避免在编辑状态修改文本
+            QTimer.singleShot(0, lambda: item.setText(self.original_text))
             return
 
         data = item.data(Qt.UserRole)
         if not data:
             self.renaming_item = self.original_text = None
+            # 延迟恢复原始文件名
+            QTimer.singleShot(0, lambda: item.setText(self.original_text))
             return
+
+        # 设置操作进行中标志
+        self.is_operation_in_progress = True
+
+        # 禁用整个界面（像刷新一样）
+        self.file_table.setEnabled(False)
+        self.show_status_progress(f"正在重命名: {self.original_text} → {full_new_name}")
+
+        # 禁用传输页面的所有按钮
+        self._set_transfer_buttons_enabled(False)
 
         if self.current_worker and self.current_worker.isRunning():
             self.current_worker.stop()
@@ -1502,7 +1561,7 @@ class MainWindow(QMainWindow):
         self.current_worker = Worker(
             func=self.api_client.batch_operation,
             operation='rename',
-            filelist=[{"path": data['path'], "newname": new_text}]
+            filelist=[{"path": data['path'], "newname": full_new_name}]
         )
         self.current_worker.finished.connect(self.on_rename_success)
         self.current_worker.error.connect(self.on_rename_error)
@@ -1520,18 +1579,67 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "创建失败", f"文件夹 '{folder_name}' 创建失败\n\n可能原因：\n- 文件夹已存在\n- 网络连接问题\n- 权限不足")
 
     def on_rename_success(self, result):
+        # 重命名成功，直接在本地更新，不需要重新获取列表
+        if self.renaming_item:
+            # 使用保存的完整文件名（从 on_item_changed 中保存的）
+            full_new_name = getattr(self, 'full_new_name', self.renaming_item.text().strip())
+
+            # 保存引用，避免在延迟回调中访问已清空的变量
+            item_to_update = self.renaming_item
+
+            # 使用延迟更新，避免在编辑状态修改文本导致崩溃
+            QTimer.singleShot(0, lambda: self._update_item_after_rename(item_to_update, full_new_name))
+
         self.renaming_item = self.original_text = None
-        self.update_items(self.current_path)
         self.file_table.setEnabled(True)
         self.status_label.setText(f"已成功重命名")
         self.current_worker = None
+        # 清除操作进行中标志
+        self.is_operation_in_progress = False
+        # 隐藏进度条
+        self.hide_status_progress()
+        # 重新启用传输页面的所有按钮
+        self._set_transfer_buttons_enabled(True)
+
+    def _update_item_after_rename(self, item, full_new_name):
+        """延迟更新item显示和路径信息"""
+        if item:
+            # 更新显示的文件名
+            item.setText(full_new_name)
+
+            # 更新 data 中的路径信息
+            data = item.data(Qt.UserRole)
+            if data:
+                # 构建新的路径
+                old_path = data['path']
+                path_parts = old_path.rstrip('/').rsplit('/', 1)
+                if len(path_parts) == 2:
+                    parent_dir, old_name = path_parts
+                    new_path = f"{parent_dir}/{full_new_name}"
+                    data['path'] = new_path
+                    item.setData(Qt.UserRole, data)
 
     def on_rename_error(self, error_msg):
+        # 重命名失败，延迟恢复原始文件名
+        item_to_restore = None
+        original_text = None
+        if self.renaming_item and self.original_text:
+            item_to_restore = self.renaming_item
+            original_text = self.original_text
+
         self.renaming_item = self.original_text = None
-        self.update_items(self.current_path)
+        self.file_table.setEnabled(True)
         self.status_label.setText(f"错误: {error_msg}")
+
+        if item_to_restore and original_text:
+            QTimer.singleShot(0, lambda: item_to_restore.setText(original_text))
+
         QMessageBox.critical(self, "错误", f"改名失败：{error_msg}")
         self.current_worker = None
+        # 清除操作进行中标志
+        self.is_operation_in_progress = False
+        # 隐藏进度条
+        self.hide_status_progress()
 
     def show_tooltip(self, pos: QPoint, text: str, p_str: Optional[QWidget], rect: QRect):
         """显示工具提示"""
@@ -1583,21 +1691,119 @@ class MainWindow(QMainWindow):
 
         # 检查点击的按钮
         if msg_box.clickedButton() == yes_btn:
+            # 保存要删除的行号和文件列表
+            self.rows_to_delete = rows_to_delete
+            self.file_count_to_delete = file_count
+
+            # 设置操作进行中标志
+            self.is_operation_in_progress = True
+
+            # 禁用整个界面
+            self.file_table.setEnabled(False)
+            self.show_status_progress(f"正在删除 {file_count} 个项目...")
+
+            # 禁用传输页面的所有按钮
+            self._set_transfer_buttons_enabled(False)
+
             # 收集所有文件路径
             file_paths = [f['path'] for f in file_list]
 
-            # 批量删除
-            if self.api_client.delete_files(file_paths):
-                # 从表格中删除所有选中的行（从后往前删除，避免行号变化）
-                for row in sorted(rows_to_delete, reverse=True):
-                    self.file_table.removeRow(row)
+            # 使用 Worker 异步删除
+            if self.current_worker and self.current_worker.isRunning():
+                self.current_worker.stop()
+                self.current_worker.wait()
 
-                self.status_label.setText(f"已删除 {file_count} 个项目")
-            else:
-                QMessageBox.warning(self, "失败", "删除文件失败")
+            self.current_worker = Worker(
+                func=self.api_client.delete_files,
+                file_paths=file_paths
+            )
+            self.current_worker.finished.connect(self.on_delete_success)
+            self.current_worker.error.connect(self.on_delete_error)
+            self.current_worker.start()
+
+    def on_delete_success(self, result):
+        """删除成功回调"""
+        # 从表格中删除所有选中的行（从后往前删除，避免行号变化）
+        if hasattr(self, 'rows_to_delete'):
+            for row in sorted(self.rows_to_delete, reverse=True):
+                self.file_table.removeRow(row)
+
+            file_count = getattr(self, 'file_count_to_delete', 0)
+            self.status_label.setText(f"已删除 {file_count} 个项目")
+
+            # 清理临时变量
+            delattr(self, 'rows_to_delete')
+            delattr(self, 'file_count_to_delete')
+
+        # 重新启用界面
+        self.file_table.setEnabled(True)
+        self.is_operation_in_progress = False
+        self.hide_status_progress()
+        self.current_worker = None
+        # 重新启用传输页面的所有按钮
+        self._set_transfer_buttons_enabled(True)
+
+    def on_delete_error(self, error_msg):
+        """删除失败回调"""
+        QMessageBox.warning(self, "失败", f"删除文件失败: {error_msg}")
+
+        # 清理临时变量
+        if hasattr(self, 'rows_to_delete'):
+            delattr(self, 'rows_to_delete')
+        if hasattr(self, 'file_count_to_delete'):
+            delattr(self, 'file_count_to_delete')
+
+        # 重新启用界面
+        self.file_table.setEnabled(True)
+        self.is_operation_in_progress = False
+        self.hide_status_progress()
+        self.current_worker = None
+        # 重新启用传输页面的所有按钮
+        self._set_transfer_buttons_enabled(True)
 
     def download_file(self, item, path):
         """下载文件"""
+        # 检查是否有操作正在进行（界面已被禁用，无法操作）
+        if self.is_operation_in_progress:
+            logger.info(f"操作进行中，忽略下载请求")
+            return
+
+        self._execute_download(item, path)
+
+    def _set_transfer_buttons_enabled(self, enabled):
+        """设置传输页面按钮的启用状态"""
+        if not self.transfer_page:
+            return
+
+        # 禁用/启用所有控制按钮
+        buttons = [
+            # 主窗口的文件管理按钮
+            getattr(self, 'upload_btn', None),
+            getattr(self, 'download_btn', None),
+            getattr(self, 'create_folder_btn', None),
+            getattr(self, 'refresh_btn', None),
+            # 传输页面的按钮
+            getattr(self.transfer_page, 'test_upload_btn', None),
+            getattr(self.transfer_page, 'test_download_btn', None),
+            getattr(self.transfer_page, 'upload_tab_btn', None),
+            getattr(self.transfer_page, 'download_tab_btn', None),
+            getattr(self.transfer_page, 'start_all_btn', None),
+            getattr(self.transfer_page, 'pause_all_btn', None),
+            getattr(self.transfer_page, 'clear_completed_btn', None),
+        ]
+
+        for button in buttons:
+            if button:
+                button.setEnabled(enabled)
+
+        # 也禁用/启用主窗口的页面切换按钮
+        if self.file_manage_btn:
+            self.file_manage_btn.setEnabled(enabled)
+        if self.transfer_btn:
+            self.transfer_btn.setEnabled(enabled)
+
+    def _execute_download(self, item, path):
+        """执行下载操作"""
         from utils.config_manager import ConfigManager
 
         logger.info(f"=" * 50)
@@ -1617,7 +1823,7 @@ class MainWindow(QMainWindow):
 
         # 获取默认下载路径
         config = ConfigManager()
-        default_download_dir = config.get_default_download_path()
+        default_download_dir = config.get_download_path()
 
         logger.info(f"配置的默认下载目录: {default_download_dir}")
 
@@ -1766,34 +1972,56 @@ class MainWindow(QMainWindow):
                 logger.warning(f"文件夹路径为空: row={row}")
                 return
 
-            if self.current_worker and self.current_worker.isRunning():
-                self.current_worker.stop()
-                self.current_worker.wait()
+            # 检查是否有操作正在进行（界面已被禁用，无法操作）
+            if self.is_operation_in_progress:
+                logger.info(f"操作进行中，忽略双击事件")
+                return
 
-            # 设置加载标志
-            self.is_loading_files = True
-
-            self.current_path = path
-            self.file_table.setEnabled(False)
-            self.show_status_progress(f"正在加载: {path}")
-            self.update_breadcrumb(path)
-
-            self.current_worker = Worker(
-                func=self.api_client.list_files,
-                path=path
-            )
-            self.current_worker.finished.connect(self.on_directory_success)
-            self.current_worker.error.connect(self.on_directory_load_error)
-            self.current_worker.start()
+            self._execute_double_click(row, path)
 
         except Exception as e:
-            logger.error(f"双击处理失败: row={row}, error={e}")
+            logger.error(f"处理双击事件时出错: {e}")
             import traceback
             traceback.print_exc()
-            # 恢复界面状态
-            self.is_loading_files = False
-            self.file_table.setEnabled(True)
-            self.hide_status_progress()
+
+    def _execute_double_click(self, row, path=None):
+        """执行双击进入文件夹操作"""
+        if path is None:
+            # 重新获取路径
+            item = self.file_table.item(row, 0)
+            if not item:
+                logger.warning(f"无法获取行 {row} 的数据")
+                return
+
+            data = item.data(Qt.UserRole)
+            if not data or not isinstance(data, dict):
+                logger.warning(f"行 {row} 的数据无效")
+                return
+
+            path = data.get('path', '')
+            if not path:
+                logger.warning(f"行 {row} 的路径为空")
+                return
+
+        if self.current_worker and self.current_worker.isRunning():
+            self.current_worker.stop()
+            self.current_worker.wait()
+
+        # 设置加载标志
+        self.is_loading_files = True
+
+        self.current_path = path
+        self.file_table.setEnabled(False)
+        self.show_status_progress(f"正在加载: {path}")
+        self.update_breadcrumb(path)
+
+        self.current_worker = Worker(
+            func=self.api_client.list_files,
+            path=path
+        )
+        self.current_worker.finished.connect(self.on_directory_success)
+        self.current_worker.error.connect(self.on_directory_load_error)
+        self.current_worker.start()
 
     def on_directory_success(self, result):
         """目录加载成功回调"""
@@ -1804,6 +2032,8 @@ class MainWindow(QMainWindow):
         self.file_table.setEnabled(True)
         self.status_label.setText(f"已加载 {len(result)} 个项目")
         self.current_worker = None
+        # 重新启用所有按钮
+        self._set_transfer_buttons_enabled(True)
 
     def on_directory_load_error(self, error_msg):
         self.is_loading_files = False  # 清除加载标志
@@ -1812,6 +2042,8 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"错误: {error_msg}")
         QMessageBox.critical(self, "错误", f"获取目录失败：{error_msg}")
         self.current_worker = None
+        # 重新启用所有按钮
+        self._set_transfer_buttons_enabled(True)
 
     def get_list_files(self, path: str = '/'):
         if not self.api_client:

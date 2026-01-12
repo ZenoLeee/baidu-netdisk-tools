@@ -43,6 +43,10 @@ class TransferTask:
     uploadid: Optional[str] = None
     last_update_time: float = field(default_factory=time.time)
 
+    # 下载断点续传相关
+    dlink: Optional[str] = None  # 下载链接
+    dlink_time: Optional[float] = None  # dlink获取时间（用于判断是否过期）
+
     # 错误信息
     error_message: Optional[str] = None
 
@@ -151,8 +155,12 @@ class TransferManager:
         if self.pending_save_tasks:
             logger.info(f"保存 {len(self.pending_save_tasks)} 个待保存任务的断点数据")
             for task in self.pending_save_tasks:
-                if task.local_path and task.chunk_size > 0:
-                    self._save_resume_data(task)
+                if task.local_path:
+                    # 上传任务需要 chunk_size > 0，下载任务直接保存
+                    if task.type == 'upload' and task.chunk_size > 0:
+                        self._save_resume_data(task)
+                    elif task.type == 'download':
+                        self._save_resume_data(task)
             self.pending_save_tasks.clear()
     
     def _calculate_optimal_chunk_size(self, file_size: int, member_type: str) -> int:
@@ -275,15 +283,23 @@ class TransferManager:
         self.tasks.append(task)
 
         # 立即保存断点续传数据（在添加任务时就保存，防止用户关闭软件）
-        if task_type == 'upload' and local_path and chunk_size > 0:
-            if self.current_user_uk:
-                # 已登录，直接保存
-                self._save_resume_data(task)
-                logger.info(f"保存断点续传数据（任务添加时）: {name}")
-            else:
-                # 未登录，添加到待保存列表
-                self.pending_save_tasks.append(task)
-                logger.info(f"添加到待保存列表（未登录）: {name}")
+        if local_path:  # 上传和下载任务都需要保存
+            if task_type == 'upload' and chunk_size > 0:
+                # 上传任务(需要分片)
+                if self.current_user_uk:
+                    self._save_resume_data(task)
+                    logger.info(f"保存断点续传数据（任务添加时）: {name}")
+                else:
+                    self.pending_save_tasks.append(task)
+                    logger.info(f"添加到待保存列表（未登录）: {name}")
+            elif task_type == 'download':
+                # 下载任务
+                if self.current_user_uk:
+                    self._save_resume_data(task)
+                    logger.info(f"保存下载任务断点数据（任务添加时）: {name}")
+                else:
+                    self.pending_save_tasks.append(task)
+                    logger.info(f"添加下载任务到待保存列表（未登录）: {name}")
 
         return task
     
@@ -296,6 +312,10 @@ class TransferManager:
 
         # 确保使用新的 stop_event（避免之前暂停的状态残留）
         task.stop_event = Event()
+
+        # 重置速度（恢复任务时速度应该从0开始计算）
+        task.speed = 0
+        task.avg_slice_speed = 0
 
         # 根据是否有分片选择上传方式
         if task.total_chunks > 0:
@@ -311,9 +331,22 @@ class TransferManager:
         """开始下载任务"""
         # 确保使用新的 stop_event（避免之前暂停的状态残留）
         task.stop_event = Event()
+
+        # 重置速度（恢复任务时速度应该从0开始计算）
+        task.speed = 0
+
         thread = threading.Thread(target=self._download_file, args=(task,))
         thread.daemon = True
         thread.start()
+
+    def _is_dlink_valid(self, task: TransferTask) -> bool:
+        """检查dlink是否还有效（8小时有效期）"""
+        if not task.dlink or not task.dlink_time:
+            return False
+
+        # dlink有效期8小时（28800秒）
+        elapsed = time.time() - task.dlink_time
+        return elapsed < 28800  # 8 * 60 * 60
 
     def _download_file(self, task: TransferTask):
         """执行下载任务"""
@@ -323,61 +356,79 @@ class TransferManager:
             logger.info(f"远程路径: {task.remote_path}")
             logger.info(f"保存路径: {task.local_path}")
 
-            # 从 remote_path 中提取文件路径
-            # remote_path 应该是完整的文件路径（如 /apps/云端文件.txt）
-            remote_file_path = task.remote_path
+            dlink = None
 
-            # 首先需要获取文件的 fs_id
-            # 通过 list_files 获取文件列表，找到对应的 fs_id
-            # 这里假设 remote_path 是完整路径，我们需要获取其父目录
-            parent_dir = os.path.dirname(remote_file_path)
-            file_name = os.path.basename(remote_file_path)
+            # 优先使用已保存的dlink（如果还在有效期内）
+            if self._is_dlink_valid(task):
+                dlink = task.dlink
+                elapsed_time = time.time() - task.dlink_time
+                remaining_time = 28800 - elapsed_time
+                logger.info(f"✅ 使用缓存的dlink（剩余有效期: {remaining_time/60:.1f}分钟）")
+            else:
+                # dlink过期或不存在，需要重新获取
+                logger.info(f"⚠️ dlink无效或已过期，需要重新获取")
+                if task.dlink_time:
+                    elapsed_time = time.time() - task.dlink_time
+                    logger.info(f"dlink已过期 {elapsed_time/60:.1f} 分钟")
 
-            # 列出父目录的文件
-            file_list = self.api_client.list_files(parent_dir if parent_dir else '/')
+                # 从 remote_path 中提取文件路径
+                remote_file_path = task.remote_path
+                parent_dir = os.path.dirname(remote_file_path)
+                file_name = os.path.basename(remote_file_path)
 
-            # 查找目标文件的 fs_id
-            fs_id = None
-            file_size = 0
-            for file_info in file_list:
-                if file_info.get('path') == remote_file_path or file_info.get('server_filename') == file_name:
-                    fs_id = str(file_info.get('fs_id', ''))
-                    file_size = file_info.get('size', 0)
-                    logger.info(f"找到文件: {file_name}, fs_id: {fs_id}, 大小: {file_size}")
-                    break
+                # 列出父目录的文件
+                file_list = self.api_client.list_files(parent_dir if parent_dir else '/')
 
-            if not fs_id:
-                task.status = "失败"
-                task.error_message = "未找到文件"
-                logger.error(f"未找到文件: {remote_file_path}")
-                return
+                logger.info(f"在 {parent_dir if parent_dir else '/'} 中找到 {len(file_list)} 个文件")
 
-            # 更新文件大小（如果之前没有设置）
-            if task.size == 0:
-                task.size = file_size
+                # 查找目标文件的 fs_id
+                fs_id = None
+                file_size = 0
+                for file_info in file_list:
+                    if file_info.get('path') == remote_file_path or file_info.get('server_filename') == file_name:
+                        fs_id = str(file_info.get('fs_id', ''))
+                        file_size = file_info.get('size', 0)
+                        logger.info(f"找到文件: {file_name}, fs_id: {fs_id}, 大小: {file_size}")
+                        break
 
-            # 获取文件信息（包含 dlink）
-            file_info_result = self.api_client.get_file_info([fs_id])
-            if not file_info_result.get('success'):
-                task.status = "失败"
-                task.error_message = file_info_result.get('error', '获取文件信息失败')
-                logger.error(f"获取文件信息失败: {task.error_message}")
-                return
+                if not fs_id:
+                    task.status = "失败"
+                    task.error_message = f"未找到文件: {remote_file_path}"
+                    logger.error(f"未找到文件: {remote_file_path}")
+                    logger.error(f"父目录 {parent_dir if parent_dir else '/'} 中的文件列表:")
+                    for f in file_list:
+                        logger.error(f"  - {f.get('server_filename', 'unknown')} ({f.get('path', 'unknown')})")
+                    return
 
-            file_data = file_info_result.get('data')
-            dlink = file_data.get('dlink')
-            if not dlink:
-                task.status = "失败"
-                task.error_message = "未获取到下载链接"
-                logger.error("未获取到下载链接 (dlink)")
-                return
+                # 更新文件大小（如果之前没有设置）
+                if task.size == 0:
+                    task.size = file_size
 
-            logger.info(f"获取到下载链接: {dlink[:50]}...")
+                # 获取文件信息（包含 dlink）
+                file_info_result = self.api_client.get_file_info([fs_id])
+                if not file_info_result.get('success'):
+                    task.status = "失败"
+                    task.error_message = file_info_result.get('error', '获取文件信息失败')
+                    logger.error(f"获取文件信息失败: {task.error_message}")
+                    return
+
+                file_data = file_info_result.get('data')
+                dlink = file_data.get('dlink')
+                if not dlink:
+                    task.status = "失败"
+                    task.error_message = "未获取到下载链接"
+                    logger.error("未获取到下载链接 (dlink)")
+                    return
+
+                # 保存dlink和时间（用于断点续传）
+                task.dlink = dlink
+                task.dlink_time = time.time()
+                logger.info(f"获取到新的下载链接: {dlink[:50]}...")
 
             # 确定本地保存路径
             if not task.local_path:
                 # 如果没有指定本地路径，使用当前目录
-                task.local_path = os.path.join(os.getcwd(), file_name)
+                task.local_path = os.path.join(os.getcwd(), task.name)
 
             # 使用支持断点续传的下载方法
             download_result = self.api_client.download_file_with_resume(
@@ -397,16 +448,20 @@ class TransferManager:
                     logger.info(f"✅ 文件已确认存在，大小: {actual_size} bytes")
                 else:
                     logger.warning(f"⚠️ 下载显示成功但文件不存在: {task.local_path}")
+
+                # 清除断点续传数据
+                self._clear_resume_data(task.task_id)
             else:
                 # 检查是否是暂停
-                error_message = download_result.get('error', '下载失败')
-                if "暂停" in error_message or task.stop_event.is_set():
+                is_paused = download_result.get('paused', False)
+                if is_paused or task.stop_event.is_set():
                     task.status = "已暂停"
                     task.error_message = None
-                    logger.info(f"文件下载已暂停: {task.name}")
+                    downloaded_size = download_result.get('downloaded_size', 0)
+                    logger.info(f"文件下载已暂停: {task.name}, 已下载: {downloaded_size} bytes")
                 else:
                     task.status = "失败"
-                    task.error_message = error_message
+                    task.error_message = download_result.get('error', '下载失败')
                     logger.error(f"文件下载失败: {task.name}, 错误: {task.error_message}")
 
         except Exception as e:
@@ -722,26 +777,39 @@ class TransferManager:
         task_data = {
             'task_id': task.task_id,
             'name': task.name,
+            'type': task.type,  # 'upload' 或 'download'
             'local_path': task.local_path,
             'remote_path': task.remote_path,
             'size': task.size,
-            'uploadid': task.uploadid,
-            'total_chunks': task.total_chunks,
-            'current_chunk': task.current_chunk,
-            'uploaded_chunks': task.uploaded_chunks,
-            'chunk_size': task.chunk_size,
-            'block_list_md5': task.block_list_md5,
             'progress': task.progress,
             'status': task.status,
             'timestamp': time.time()
         }
+
+        # 上传任务特有数据
+        if task.type == 'upload':
+            task_data.update({
+                'uploadid': task.uploadid,
+                'total_chunks': task.total_chunks,
+                'current_chunk': task.current_chunk,
+                'uploaded_chunks': task.uploaded_chunks,
+                'chunk_size': task.chunk_size,
+                'block_list_md5': task.block_list_md5,
+            })
+        elif task.type == 'download':
+            # 下载任务特有数据
+            task_data.update({
+                'dlink': task.dlink,
+                'dlink_time': task.dlink_time,
+            })
+
         all_tasks_data[str(task.task_id)] = task_data
 
         # 保存所有任务数据
         try:
             with open(resume_file, 'w', encoding='utf-8') as f:
                 json.dump(all_tasks_data, f, ensure_ascii=False, indent=2)
-            logger.info(f"保存断点续传数据: {task.name}, 进度: {task.progress:.1f}%, 用户: {self.current_user_uk}")
+            logger.info(f"保存断点续传数据: {task.name} ({task.type}), 进度: {task.progress:.1f}%, 用户: {self.current_user_uk}")
         except Exception as e:
             logger.error(f"保存断点续传数据失败: {e}")
     
@@ -790,10 +858,22 @@ class TransferManager:
             task.stop_event.set()  # 设置停止标志
             task.status = "已暂停"
 
-            # 保存断点续传数据（如果已登录且有uploadid）
-            if self.current_user_uk and task.uploadid:
-                self._save_resume_data(task)
-                logger.info(f"保存断点续传数据（暂停时）: {task.name}")
+            # 重置速度（暂停后速度应该清零，继续时会重新计算）
+            task.speed = 0
+            if task.type == 'upload':
+                # 上传任务还要重置分片平均速度
+                task.avg_slice_speed = 0
+
+            # 保存断点续传数据（如果已登录）
+            if self.current_user_uk:
+                # 上传任务:需要 uploadid
+                # 下载任务:直接保存(利用本地文件大小实现断点续传)
+                if task.type == 'upload' and task.uploadid:
+                    self._save_resume_data(task)
+                    logger.info(f"保存断点续传数据（暂停时）: {task.name}")
+                elif task.type == 'download':
+                    self._save_resume_data(task)
+                    logger.info(f"保存下载任务断点数据（暂停时）: {task.name}")
 
             logger.info(f"任务 {task.name} 已暂停")
 
@@ -852,22 +932,13 @@ class TransferManager:
             for task_id_str, resume_data in all_tasks_data.items():
                 try:
                     task_id = int(task_id_str)
-
-                    # 检查 uploadid 是否有效
-                    uploadid = resume_data.get('uploadid')
-                    if uploadid:
-                        import re
-                        if re.match(r'^[a-f0-9]{16}-\d+$', uploadid):
-                            logger.warning(f"检测到无效的临时 uploadid，删除任务: {task_id}")
-                            invalid_count += 1
-                            continue
+                    task_type = resume_data.get('type', 'upload')
 
                     # 检查本地文件是否存在
                     local_path = resume_data.get('local_path')
                     if not local_path or not os.path.exists(local_path):
                         logger.warning(f"本地文件不存在，跳过恢复: {local_path}")
                         invalid_count += 1
-                        # 继续处理，不要删除，等循环结束后统一清理
                         continue
 
                     # 创建新任务
@@ -877,25 +948,63 @@ class TransferManager:
                         name=resume_data['name'],
                         remote_path=resume_data['remote_path'],
                         size=resume_data['size'],
-                        type='upload',
+                        type=task_type,
                         local_path=local_path
                     )
 
                     # 恢复任务状态
-                    task.uploadid = uploadid
-                    task.total_chunks = resume_data.get('total_chunks', 0)
-                    task.current_chunk = resume_data.get('current_chunk', 0)
-                    task.uploaded_chunks = resume_data.get('uploaded_chunks', [])
-                    task.chunk_size = resume_data.get('chunk_size', 0)
-                    task.block_list_md5 = resume_data.get('block_list_md5', [])
                     task.progress = resume_data.get('progress', 0)
-                    task.status = "已暂停（可断点续传）"
+
+                    if task_type == 'upload':
+                        # 上传任务特有数据
+                        uploadid = resume_data.get('uploadid')
+                        if uploadid:
+                            import re
+                            if re.match(r'^[a-f0-9]{16}-\d+$', uploadid):
+                                logger.warning(f"检测到无效的临时 uploadid，删除任务: {task_id}")
+                                invalid_count += 1
+                                continue
+
+                        task.uploadid = uploadid
+                        task.total_chunks = resume_data.get('total_chunks', 0)
+                        task.current_chunk = resume_data.get('current_chunk', 0)
+                        task.uploaded_chunks = resume_data.get('uploaded_chunks', [])
+                        task.chunk_size = resume_data.get('chunk_size', 0)
+                        task.block_list_md5 = resume_data.get('block_list_md5', [])
+                        task.status = "已暂停（可断点续传）"
+
+                        logger.info(f"恢复上传任务: {task.name}, 进度: {task.progress:.1f}% ({len(task.uploaded_chunks)}/{task.total_chunks} 分片)")
+
+                    elif task_type == 'download':
+                        # 下载任务
+                        task.status = "已暂停（可断点续传）"
+
+                        # 恢复dlink信息
+                        task.dlink = resume_data.get('dlink')
+                        task.dlink_time = resume_data.get('dlink_time')
+
+                        # 检查dlink是否还有效
+                        if task.dlink and task.dlink_time:
+                            elapsed = time.time() - task.dlink_time
+                            remaining = 28800 - elapsed
+                            if remaining > 0:
+                                logger.info(f"恢复的dlink还有效（剩余有效期: {remaining/60:.1f}分钟）")
+                            else:
+                                logger.info(f"恢复的dlink已过期 {elapsed/60:.1f} 分钟，需要重新获取")
+
+                        # 检查本地文件大小,更新进度
+                        try:
+                            downloaded_size = os.path.getsize(local_path)
+                            total_size = task.size
+                            if total_size > 0:
+                                task.progress = (downloaded_size / total_size) * 100
+                            logger.info(f"恢复下载任务: {task.name}, 进度: {task.progress:.1f}% ({downloaded_size}/{total_size} bytes)")
+                        except Exception as e:
+                            logger.warning(f"无法获取本地文件大小: {e}")
 
                     # 添加到任务列表
                     self.tasks.append(task)
                     resumed_count += 1
-
-                    logger.info(f"恢复任务: {task.name}, 进度: {task.progress:.1f}% ({len(task.uploaded_chunks)}/{task.total_chunks} 分片)")
 
                 except Exception as e:
                     logger.error(f"恢复任务失败: {task_id_str}, 错误: {e}")
