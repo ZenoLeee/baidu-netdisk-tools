@@ -79,9 +79,67 @@ class MainWindow(QMainWindow):
         self.file_manage_btn = None
         self.transfer_btn = None
 
+        # 快速显示窗口（不等待UI初始化完成）
+        self.setWindowTitle(AppConstants.APP_NAME)
+        self.setMinimumSize(AppConstants.WINDOW_MIN_WIDTH, AppConstants.WINDOW_MIN_HEIGHT)
+
+        # 创建中央部件和启动提示标签
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
+        layout.setAlignment(Qt.AlignCenter)
+
+        # 启动提示标签
+        self.startup_label = QLabel("正在初始化...")
+        self.startup_label.setAlignment(Qt.AlignCenter)
+        self.startup_label.setStyleSheet("""
+            QLabel {
+                font-size: 16px;
+                color: #666666;
+                padding: 20px;
+            }
+        """)
+        layout.addWidget(self.startup_label)
+
+        # 立即显示窗口
+        self.show()
+
+        # 延迟初始化UI（让窗口先显示并渲染）
+        QTimer.singleShot(50, self.delayed_init)
+
+    def delayed_init(self):
+        """延迟初始化，让窗口先显示"""
+        # 检查是否有已保存的账号
+        accounts = self.config.get_all_accounts()
+
+        # 如果有账号，显示"正在登录"
+        if accounts:
+            self.startup_label.setText("正在登录...")
+            logger.info(f"找到 {len(accounts)} 个已保存账号，准备自动登录")
+        else:
+            self.startup_label.setText("准备就绪")
+
+        # 强制刷新界面，确保提示显示
+        QApplication.processEvents()
+
+        # 再延迟一点初始化UI，让提示先显示出来
+        QTimer.singleShot(100, self.setup_full_ui)
+
+    def setup_full_ui(self):
+        """完整设置UI"""
         # 设置UI
         self.setup_ui()
+
+        # 移除启动提示（被setup_ui中的页面替代）
+        if hasattr(self, 'startup_label') and self.startup_label:
+            self.startup_label.deleteLater()
+            self.startup_label = None
+
+        # 检查自动登录
         self.check_auto_login()
+
+        # 启动后延迟自动检查更新（1秒后）
+        QTimer.singleShot(1000, lambda: self.check_for_updates(auto_check=True))
 
     def check_auto_login(self):
         """检查并尝试自动登录"""
@@ -2104,9 +2162,6 @@ class MainWindow(QMainWindow):
         self.tab_container.setVisible(True)
 
         self.user_info_widget.setVisible(True)
-
-        # 登录成功后，延迟检查更新（避免阻塞登录流程）
-        QTimer.singleShot(1000, lambda: self.check_for_updates(auto_check=True))
 
         # 更新状态栏
         self.status_label.setText(f"已登录: {self.current_account}")

@@ -140,3 +140,4 @@ cython_debug/
 # Sensitive configuration files
 config.json
 resume_data/
+log/

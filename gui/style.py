@@ -21,6 +21,9 @@ class AppStyles:
         'labels.qss',      # 标签样式
     ]
 
+    # 样式缓存
+    _cached_stylesheet = None
+
     @staticmethod
     def _get_static_dir():
         """
@@ -37,16 +40,20 @@ class AppStyles:
 
         return os.path.join(base_dir, 'static')
 
-    @staticmethod
-    def get_stylesheet() -> str:
+    @classmethod
+    def get_stylesheet(cls) -> str:
         """
-        获取应用程序完整样式表
+        获取应用程序完整样式表（带缓存）
         按顺序加载所有QSS文件并合并
         """
-        qss_parts = []
-        static_dir = AppStyles._get_static_dir()
+        # 如果已缓存，直接返回
+        if cls._cached_stylesheet is not None:
+            return cls._cached_stylesheet
 
-        for qss_file in AppStyles.QSS_FILES:
+        qss_parts = []
+        static_dir = cls._get_static_dir()
+
+        for qss_file in cls.QSS_FILES:
             file_path = os.path.join(static_dir, qss_file)
             try:
                 with open(file_path, 'r', encoding='utf-8') as fp:
@@ -60,6 +67,10 @@ class AppStyles:
 
         # 合并所有样式
         full_qss = '\n\n'.join(qss_parts)
+
+        # 缓存样式表
+        cls._cached_stylesheet = full_qss
+
         return full_qss
 
     @staticmethod

@@ -22,11 +22,6 @@ class LoginDialog(QDialog):
         super().__init__(parent)
         self.setup_ui()
         self.load_accounts()
-        # self.setup_connections()
-        # self.setup_progress_dialog()
-        # self.setup_timer()
-        # self.setup_refresh_button()
-        # self.setup_account_switch_dialog()
         self.baidu_api = BaiduPanAPI()
         self.worker = None  # 添加工作线程引用
 
