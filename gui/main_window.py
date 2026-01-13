@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import (
     Qt, QTimer, QPoint, QRect
 )
-from PyQt5.QtGui import QIcon, QKeySequence, QCursor, QColor
+from PyQt5.QtGui import QIcon, QKeySequence, QCursor, QColor, QBrush
 
 from gui.login_dialog import LoginDialog
 from core.api_client import BaiduPanAPI
@@ -66,6 +66,11 @@ class MainWindow(QMainWindow):
         # 扫描相关
         self.current_worker = None  # 当前工作线程
         self.progress_dialog = None
+
+        # 复制粘贴相关
+        self.copied_files = []  # 保存复制的文件信息列表
+        self.cut_mode = False  # 是否为剪切模式
+        self.cut_files_original_paths = []  # 保存剪切文件的原始路径（用于移动）
 
         # 当前用户信息
         self.current_account = None
@@ -441,6 +446,7 @@ class MainWindow(QMainWindow):
 
         # 连接拖拽信号
         self.file_table.files_dropped.connect(self.handle_dropped_files)
+        self.file_table.rows_moved.connect(self.handle_rows_moved)
 
         # 设置表格头的行为
         self.file_table.cellDoubleClicked.connect(self.on_table_double_clicked)
@@ -470,6 +476,9 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Delete"), self.file_table).activated.connect(self.delete_file)
         QShortcut(QKeySequence("Ctrl+1"), self).activated.connect(self.switch_to_file_manage_page)
         QShortcut(QKeySequence("Ctrl+2"), self).activated.connect(self.switch_to_transfer_page)
+        QShortcut(QKeySequence("Ctrl+C"), self.file_table).activated.connect(self.copy_files)
+        QShortcut(QKeySequence("Ctrl+X"), self.file_table).activated.connect(self.cut_files)
+        QShortcut(QKeySequence("Ctrl+V"), self.file_table).activated.connect(self.paste_files)
 
         user_layout.addWidget(self.file_table)
         main_layout.addWidget(user_card)
@@ -665,6 +674,605 @@ class MainWindow(QMainWindow):
 
         # 刷新文件列表
         self.update_items(self.current_path)
+
+    def handle_rows_moved(self, rows_data, target_folder_path):
+        """处理表格内行移动（文件移动到文件夹）"""
+        if not rows_data or not target_folder_path:
+            return
+
+        # 检查是否正在加载文件或切换账号
+        if self.is_loading_files or self.is_switching_account or self.is_operation_in_progress:
+            logger.info("操作进行中，忽略移动请求")
+            return
+
+        # 收集要移动的文件路径和对应的行号
+        source_paths = []
+        self.rows_to_move = []  # 保存要移动的行号
+        for data in rows_data:
+            path = data.get('path', '')
+            if path:
+                # 检查是否尝试将文件夹移动到它自身或其子文件夹中
+                if data.get('is_dir'):
+                    # 避免将文件夹移动到自己里面
+                    if path == target_folder_path or path.startswith(target_folder_path.rstrip('/') + '/'):
+                        QMessageBox.warning(
+                            self,
+                            "移动失败",
+                            f"不能将文件夹移动到它自身或其子文件夹中"
+                        )
+                        return
+
+                source_paths.append(path)
+
+                # 找到对应的行号
+                for row in range(self.file_table.rowCount()):
+                    item = self.file_table.item(row, 0)
+                    if item and item.data(Qt.UserRole):
+                        item_path = item.data(Qt.UserRole).get('path', '')
+                        if item_path == path:
+                            self.rows_to_move.append(row)
+                            break
+
+        if not source_paths:
+            return
+
+        # 设置操作进行中标志
+        self.is_operation_in_progress = True
+
+        # 禁用界面
+        self.file_table.setEnabled(False)
+        target_folder_name = target_folder_path.rstrip('/').split('/')[-1]
+        self.show_status_progress(f"正在移动 {len(source_paths)} 个项目到 '{target_folder_name}'...")
+
+        # 禁用传输页面的所有按钮
+        self._set_transfer_buttons_enabled(False)
+
+        # 使用 Worker 异步移动
+        if self.current_worker and self.current_worker.isRunning():
+            self.current_worker.stop()
+            self.current_worker.wait()
+
+        self.current_worker = Worker(
+            func=self.api_client.move_files,
+            source_paths=source_paths,
+            dest_path=target_folder_path
+        )
+        self.current_worker.finished.connect(self.on_move_success)
+        self.current_worker.error.connect(self.on_move_error)
+        self.current_worker.start()
+
+    def on_move_success(self, result):
+        """移动成功回调"""
+        self.hide_status_progress()
+        self.file_table.setEnabled(True)
+        self.is_operation_in_progress = False
+        self.current_worker = None
+        self._set_transfer_buttons_enabled(True)
+
+        # 从表格中删除已移动的行（从后往前删除，避免行号变化）
+        if hasattr(self, 'rows_to_move') and self.rows_to_move:
+            for row in sorted(self.rows_to_move, reverse=True):
+                self.file_table.removeRow(row)
+
+            # 清理
+            delattr(self, 'rows_to_move')
+
+        if result.get('success'):
+            self.status_label.setText("文件移动成功")
+        else:
+            self.status_label.setText("文件移动完成（可能有部分失败）")
+
+    def on_move_error(self, error_msg):
+        """移动失败回调"""
+        self.hide_status_progress()
+        self.file_table.setEnabled(True)
+        self.is_operation_in_progress = False
+        self.current_worker = None
+        self._set_transfer_buttons_enabled(True)
+
+        QMessageBox.warning(self, "移动失败", f"移动文件失败: {error_msg}")
+        self.status_label.setText("文件移动失败")
+
+    def copy_files(self):
+        """复制选中的文件"""
+        # 检查是否正在加载文件或切换账号
+        if self.is_loading_files or self.is_switching_account:
+            return
+
+        selected_items = self.file_table.selectedItems()
+        if not selected_items:
+            return
+
+        # 收集选中的文件信息（去重）
+        files_to_copy = []
+        rows_seen = set()
+        for item in selected_items:
+            row = item.row()
+            if row not in rows_seen:
+                rows_seen.add(row)
+                name_item = self.file_table.item(row, 0)
+                if name_item:
+                    data = name_item.data(Qt.UserRole)
+                    if data:
+                        # 确保数据完整（创建深拷贝）
+                        import copy
+                        file_data_copy = copy.deepcopy(data)
+                        files_to_copy.append(file_data_copy)
+
+        if not files_to_copy:
+            return
+
+        # 保存到剪贴板
+        self.copied_files = files_to_copy
+        self.cut_mode = False  # 复制模式
+
+        # 清除剪切相关数据
+        self.cut_files_original_paths = []
+
+        # 刷新表格以更新视觉效果（清除剪切状态的高亮）
+        self._refresh_cut_visual_state()
+
+        # 显示通知
+        if len(files_to_copy) == 1:
+            file_name = files_to_copy[0].get('path', '').rstrip('/').split('/')[-1]
+            self.status_label.setText(f"已复制: {file_name}")
+        else:
+            self.status_label.setText(f"已复制 {len(files_to_copy)} 个项目")
+
+    def cut_files(self):
+        """剪切选中的文件"""
+        # 检查是否正在加载文件或切换账号
+        if self.is_loading_files or self.is_switching_account:
+            return
+
+        selected_items = self.file_table.selectedItems()
+        if not selected_items:
+            return
+
+        # 收集选中的文件信息（去重）
+        files_to_cut = []
+        rows_seen = set()
+        for item in selected_items:
+            row = item.row()
+            if row not in rows_seen:
+                rows_seen.add(row)
+                name_item = self.file_table.item(row, 0)
+                if name_item:
+                    data = name_item.data(Qt.UserRole)
+                    if data:
+                        # 确保数据完整（创建深拷贝）
+                        import copy
+                        file_data_copy = copy.deepcopy(data)
+                        files_to_cut.append(file_data_copy)
+
+        if not files_to_cut:
+            return
+
+        # 保存到剪贴板
+        self.copied_files = files_to_cut
+        self.cut_mode = True  # 剪切模式
+        self.cut_files_original_paths = [f.get('path', '') for f in files_to_cut]
+
+        # 刷新表格以显示剪切状态的视觉效果
+        self._refresh_cut_visual_state()
+
+        # 显示通知
+        if len(files_to_cut) == 1:
+            file_name = files_to_cut[0].get('path', '').rstrip('/').split('/')[-1]
+            self.status_label.setText(f"已剪切: {file_name}")
+        else:
+            self.status_label.setText(f"已剪切 {len(files_to_cut)} 个项目")
+
+    def _refresh_cut_visual_state(self):
+        """刷新剪切状态的视觉效果"""
+        try:
+            if not self.cut_mode:
+                # 清除所有剪切高亮 - 恢复默认颜色
+                for row in range(self.file_table.rowCount()):
+                    for col in range(self.file_table.columnCount()):
+                        item = self.file_table.item(row, col)
+                        if item:
+                            # 使用 setData 清除前景色
+                            item.setData(Qt.ForegroundRole, None)
+            else:
+                # 显示剪切高亮（灰色）
+                for row in range(self.file_table.rowCount()):
+                    name_item = self.file_table.item(row, 0)
+                    if name_item:
+                        data = name_item.data(Qt.UserRole)
+                        if data and self.cut_files_original_paths:
+                            path = data.get('path', '')
+                            # 检查是否是被剪切的文件
+                            if path in self.cut_files_original_paths:
+                                # 设置灰色文字
+                                for col in range(self.file_table.columnCount()):
+                                    item = self.file_table.item(row, col)
+                                    if item:
+                                        item.setData(Qt.ForegroundRole, QBrush(QColor(150, 150, 150)))
+
+            # 强制重绘
+            self.file_table.viewport().update()
+        except Exception as e:
+            logger.error(f"刷新剪切视觉效果时出错: {e}")
+
+    def paste_files(self):
+        """粘贴文件到当前目录"""
+        # 检查是否正在加载文件或切换账号
+        if self.is_loading_files or self.is_switching_account or self.is_operation_in_progress:
+            logger.info("操作进行中，忽略粘贴请求")
+            return
+
+        # 检查是否有复制的文件
+        if not self.copied_files:
+            self.status_label.setText("没有可粘贴的文件")
+            return
+
+        # 剪切模式：移动文件
+        if self.cut_mode:
+            self._paste_cut_files()
+        # 复制模式：复制文件
+        else:
+            self._paste_copy_files()
+
+    def _paste_cut_files(self):
+        """粘贴剪切模式的文件（移动）"""
+        source_paths = list(self.cut_files_original_paths)
+        dest_path = self.current_path
+
+        # 分析每个源文件的父目录，用于后续更新表格
+        self._source_parent_dirs = set()
+        for path in source_paths:
+            # 获取父目录
+            parent_dir = '/'.join(path.rstrip('/').split('/')[:-1])
+            if parent_dir == '':
+                parent_dir = '/'
+            self._source_parent_dirs.add(parent_dir)
+
+        # 检查是否有源文件在当前目录（需要删除）
+        self._rows_to_remove = []
+        if self.current_path in self._source_parent_dirs:
+            for path in source_paths:
+                for row in range(self.file_table.rowCount()):
+                    item = self.file_table.item(row, 0)
+                    if item and item.data(Qt.UserRole):
+                        item_path = item.data(Qt.UserRole).get('path', '')
+                        if item_path == path:
+                            self._rows_to_remove.append(row)
+                            break
+
+        # 设置操作进行中标志
+        self.is_operation_in_progress = True
+        self.file_table.setEnabled(False)
+        self.show_status_progress(f"正在移动 {len(source_paths)} 个项目...")
+        self._set_transfer_buttons_enabled(False)
+
+        # 使用 Worker 异步移动
+        if self.current_worker and self.current_worker.isRunning():
+            self.current_worker.stop()
+            self.current_worker.wait()
+
+        self.current_worker = Worker(
+            func=self.api_client.move_files,
+            source_paths=source_paths,
+            dest_path=dest_path
+        )
+        self.current_worker.finished.connect(self.on_cut_paste_success)
+        self.current_worker.error.connect(self.on_paste_error)
+        self.current_worker.start()
+
+    def _paste_copy_files(self):
+        """粘贴复制模式的文件（复制）"""
+        # 创建副本避免原数据被修改
+        copied_files_backup = list(self.copied_files)
+
+        # 收集要复制的文件路径
+        source_paths = []
+        files_to_copy = []
+        existing_files = []
+
+        for data in copied_files_backup:
+            if not data:
+                continue
+            path = data.get('path', '')
+            if path:
+                # 获取文件名
+                file_name = path.rstrip('/').split('/')[-1]
+
+                # 检查当前目录是否已有同名文件
+                already_exists = False
+                for row in range(self.file_table.rowCount()):
+                    item = self.file_table.item(row, 0)
+                    if item and item.text() == file_name:
+                        existing_files.append(file_name)
+                        already_exists = True
+                        break
+
+                if not already_exists:
+                    source_paths.append(path)
+                    files_to_copy.append(data)
+
+        # 如果所有文件都已存在，提示用户
+        if not source_paths:
+            if len(existing_files) == 1:
+                QMessageBox.information(
+                    self,
+                    "提示",
+                    f"文件 '{existing_files[0]}' 已在当前目录中"
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "提示",
+                    f"所有选中的文件 ({len(existing_files)} 个) 都已在当前目录中"
+                )
+            return
+
+        # 如果部分文件已存在，询问是否继续复制其他文件
+        if existing_files:
+            if len(existing_files) == 1:
+                msg = f"文件 '{existing_files[0]}' 已在当前目录中\n\n是否继续复制其他 {len(source_paths)} 个文件？"
+            else:
+                msg = f"有 {len(existing_files)} 个文件已在当前目录中\n\n是否继续复制其他 {len(source_paths)} 个文件？"
+
+            reply = QMessageBox.question(
+                self,
+                '文件已存在',
+                msg,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+
+            if reply != QMessageBox.Yes:
+                return
+
+        # 目标路径是当前目录
+        dest_path = self.current_path
+
+        # 设置操作进行中标志
+        self.is_operation_in_progress = True
+        self.file_table.setEnabled(False)
+        self.show_status_progress(f"正在复制 {len(source_paths)} 个项目...")
+        self._set_transfer_buttons_enabled(False)
+
+        # 保存实际要复制的文件数量和文件信息，用于回调显示
+        self._actual_copy_count = len(source_paths)
+        self._copied_files_backup = files_to_copy
+
+        # 使用 Worker 异步复制
+        if self.current_worker and self.current_worker.isRunning():
+            self.current_worker.stop()
+            self.current_worker.wait()
+
+        self.current_worker = Worker(
+            func=self.api_client.copy_files,
+            source_paths=source_paths,
+            dest_path=dest_path
+        )
+        self.current_worker.finished.connect(self.on_copy_success)
+        self.current_worker.error.connect(self.on_copy_error)
+        self.current_worker.start()
+
+    def on_copy_success(self, result):
+        """复制成功回调"""
+        self.hide_status_progress()
+        self.file_table.setEnabled(True)
+        self.is_operation_in_progress = False
+        self.current_worker = None
+        self._set_transfer_buttons_enabled(True)
+
+        # 获取实际复制的文件数量和备份
+        actual_count = getattr(self, '_actual_copy_count', 0)
+        copied_backup = getattr(self, '_copied_files_backup', [])
+
+        # 清理临时变量
+        if hasattr(self, '_actual_copy_count'):
+            delattr(self, '_actual_copy_count')
+        if hasattr(self, '_copied_files_backup'):
+            delattr(self, '_copied_files_backup')
+
+        # 刷新文件列表以显示复制的文件
+        self.update_items(self.current_path)
+
+        if result.get('success'):
+            if actual_count == 1 and copied_backup:
+                file_name = copied_backup[0].get('path', '').rstrip('/').split('/')[-1]
+                self.status_label.setText(f"已复制: {file_name}")
+            elif actual_count > 0:
+                self.status_label.setText(f"已复制 {actual_count} 个项目")
+            else:
+                self.status_label.setText("复制完成")
+        else:
+            self.status_label.setText("复制完成（可能有部分失败）")
+
+    def on_copy_error(self, error_msg):
+        """复制失败回调"""
+        self.hide_status_progress()
+        self.file_table.setEnabled(True)
+        self.is_operation_in_progress = False
+        self.current_worker = None
+        self._set_transfer_buttons_enabled(True)
+
+        QMessageBox.warning(self, "复制失败", f"复制文件失败: {error_msg}")
+        self.status_label.setText("文件复制失败")
+
+    def on_cut_paste_success(self, result):
+        """剪切粘贴成功回调（移动成功）"""
+        self.hide_status_progress()
+        self.file_table.setEnabled(True)
+        self.is_operation_in_progress = False
+        self.current_worker = None
+        self._set_transfer_buttons_enabled(True)
+
+        # 删除在当前目录的源文件（从后往前删除，避免行号变化）
+        if hasattr(self, '_rows_to_remove') and self._rows_to_remove:
+            for row in sorted(self._rows_to_remove, reverse=True):
+                if row < self.file_table.rowCount():
+                    self.file_table.removeRow(row)
+
+        # 如果源文件不在当前目录，添加移动到当前目录的文件
+        source_parent_dirs = getattr(self, '_source_parent_dirs', set())
+        if self.current_path not in source_parent_dirs:
+            # 使用原始文件信息创建新行（路径更新为当前目录）
+            # 收集所有要添加的文件
+            files_to_add = []
+            for data in self.copied_files:
+                old_path = data.get('path', '')
+                file_name = old_path.rstrip('/').split('/')[-1]
+                new_path = f"{self.current_path.rstrip('/')}/{file_name}"
+                new_file_data = data.copy()
+                new_file_data['path'] = new_path
+                files_to_add.append((file_name, new_file_data))
+
+            # 添加到表格的合适位置（保持排序）
+            for file_name, file_data in files_to_add:
+                self._add_file_item_sorted(file_name, file_data)
+
+        # 清理临时变量
+        for attr in ['_rows_to_remove', '_source_parent_dirs']:
+            if hasattr(self, attr):
+                delattr(self, attr)
+
+        # 清除剪切模式
+        self.cut_mode = False
+        self.cut_files_original_paths = []
+        self.copied_files = []
+
+        if result.get('success'):
+            self.status_label.setText("文件移动成功")
+        else:
+            self.status_label.setText("文件移动完成（可能有部分失败）")
+
+    def _add_file_item_sorted(self, file_name, file_data):
+        """添加文件项到表格的正确位置（文件夹优先，然后按字母顺序）"""
+        try:
+            # 判断新文件是否是文件夹
+            is_dir = file_data.get('is_dir', False)
+
+            # 调试：打印文件数据
+            logger.info(f"[DEBUG] 添加文件: {file_name}, is_dir={is_dir}, size={file_data.get('size')}, mtime={file_data.get('mtime')}")
+
+            # 找到合适的插入位置
+            insert_row = self.file_table.rowCount()
+
+            for row in range(self.file_table.rowCount()):
+                item = self.file_table.item(row, 0)
+                if item and item.data(Qt.UserRole):
+                    current_data = item.data(Qt.UserRole)
+                    current_is_dir = current_data.get('is_dir', False)
+                    current_name = item.text()
+
+                    # 文件夹优先：如果当前是文件，新文件是文件夹，插入到这里
+                    if not current_is_dir and is_dir:
+                        insert_row = row
+                        break
+
+                    # 同类型比较：按字母顺序
+                    if current_is_dir == is_dir:
+                        if file_name.lower() < current_name.lower():
+                            insert_row = row
+                            break
+
+            # 插入新行
+            self.file_table.insertRow(insert_row)
+
+            # 创建文件名项（带图标）
+            name_item = QTableWidgetItem(file_name)
+            name_item.setData(Qt.UserRole, file_data)
+
+            # 设置图标（文件夹或文件）
+            if is_dir:
+                name_item.setIcon(self.style().standardIcon(QStyle.SP_DirIcon))
+            else:
+                name_item.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))
+
+            self.file_table.setItem(insert_row, 0, name_item)
+
+            # 大小 - 使用 file_data 中的原始大小
+            size = file_data.get('size', 0)
+            logger.info(f"[DEBUG] 文件 {file_name} 大小: {size}, 类型: {type(size)}")
+
+            if not is_dir and size is not None and size > 0:
+                from utils.file_utils import FileUtils
+                size_text = FileUtils.format_size(size)
+                logger.info(f"[DEBUG] 格式化后大小: {size_text}")
+            else:
+                size_text = ''
+
+            size_item = QTableWidgetItem(size_text)
+            self.file_table.setItem(insert_row, 1, size_item)
+
+            # 修改时间 - 使用 file_data 中的原始时间
+            mtime = file_data.get('mtime', 0)
+            logger.info(f"[DEBUG] 文件 {file_name} mtime: {mtime}, 类型: {type(mtime)}")
+
+            if mtime and mtime > 0:
+                time_text = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
+                logger.info(f"[DEBUG] 格式化后时间: {time_text}")
+            else:
+                time_text = ''
+
+            time_item = QTableWidgetItem(time_text)
+            self.file_table.setItem(insert_row, 2, time_item)
+
+            logger.info(f"[DEBUG] 文件项添加完成，行: {insert_row}")
+
+        except Exception as e:
+            logger.error(f"添加文件项到表格时出错: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _add_file_item_to_table(self, file_data, target_dir):
+        """添加文件项到表格（旧方法，保留兼容）"""
+        try:
+            # 获取文件名
+            old_path = file_data.get('path', '')
+            file_name = old_path.rstrip('/').split('/')[-1]
+            new_path = f"{target_dir.rstrip('/')}/{file_name}"
+
+            # 创建新路径的文件数据
+            new_file_data = file_data.copy()
+            new_file_data['path'] = new_path
+
+            # 添加行到表格
+            row = self.file_table.rowCount()
+            self.file_table.insertRow(row)
+
+            # 设置各个列的数据
+            name_item = QTableWidgetItem(file_name)
+            name_item.setData(Qt.UserRole, new_file_data)
+            self.file_table.setItem(row, 0, name_item)
+
+            # 大小
+            size = file_data.get('size', 0)
+            if not file_data.get('is_dir'):
+                from utils.file_utils import FileUtils
+                size_text = FileUtils.format_size(size)
+            else:
+                size_text = ''
+            self.file_table.setItem(row, 1, QTableWidgetItem(size_text))
+
+            # 修改时间
+            mtime = file_data.get('mtime', 0)
+            time_text = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime)) if mtime else ''
+            self.file_table.setItem(row, 2, QTableWidgetItem(time_text))
+
+        except Exception as e:
+            logger.error(f"添加文件项到表格时出错: {e}")
+
+    def on_paste_error(self, error_msg):
+        """粘贴失败回调（剪切和复制共用）"""
+        self.hide_status_progress()
+        self.file_table.setEnabled(True)
+        self.is_operation_in_progress = False
+        self.current_worker = None
+        self._set_transfer_buttons_enabled(True)
+
+        if self.cut_mode:
+            QMessageBox.warning(self, "移动失败", f"移动文件失败: {error_msg}")
+            self.status_label.setText("文件移动失败")
+        else:
+            QMessageBox.warning(self, "复制失败", f"复制文件失败: {error_msg}")
+            self.status_label.setText("文件复制失败")
 
     # 上传文件
     def upload_file(self):
@@ -1048,22 +1656,8 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):
         """事件过滤器，用于监听按键和点击事件"""
-        # 禁用表格的拖动选择
-        if obj == self.file_table.viewport():
-            if event.type() == event.MouseButtonPress:
-                if event.button() == Qt.LeftButton:
-                    # 记录鼠标按下位置
-                    self._drag_start_pos = event.pos()
-            elif event.type() == event.MouseMove:
-                # 检查是否在拖动（移动距离超过阈值）
-                if self._drag_start_pos is not None:
-                    drag_distance = (event.pos() - self._drag_start_pos).manhattanLength()
-                    if drag_distance > 5:  # 超过5像素视为拖动
-                        # 阻止拖动选择
-                        return True
-            elif event.type() == event.MouseButtonRelease:
-                # 清除拖动起始位置
-                self._drag_start_pos = None
+        # 不再阻止拖动选择，让表格自己处理拖拽
+        # 只处理创建文件夹相关的事件
 
         # 只在创建文件夹时处理以下事件
         if not getattr(self, 'creating_folder', False):
@@ -1352,6 +1946,14 @@ class MainWindow(QMainWindow):
 
             menu.addAction("📋 复制文件名", lambda: self.copy_item_text(item.text()))
 
+            # 添加复制和剪切选项
+            menu.addAction("📄 复制", self.copy_files)
+            menu.addAction("✂️ 剪切", self.cut_files)
+
+            # 如果有复制的文件，显示粘贴选项
+            if self.copied_files:
+                menu.addAction("📋 粘贴", self.paste_files)
+
             if data:
                 if not data.get('is_dir'):
                     menu.addAction("⬇️ 下载", lambda: self.download_file(item, data['path']))
@@ -1362,6 +1964,11 @@ class MainWindow(QMainWindow):
         else:
             # 空白处右键，添加新建文件夹选项
             menu.addAction("📁 新建文件夹", self.create_folder_dialog)
+
+            # 如果有复制的文件，显示粘贴选项
+            if self.copied_files:
+                menu.addAction("📋 粘贴 (Ctrl+V)", self.paste_files)
+
             menu.addSeparator()
             menu.addAction("🔄 刷新", lambda: self.update_items(self.current_path))
             menu.addAction("✓ 全选", self.file_table.selectAll)
@@ -1971,7 +2578,16 @@ class MainWindow(QMainWindow):
                 isdir = file.get('isdir', 0)
                 fs_id = file.get('fs_id', '')
 
-                name_item.setData(Qt.UserRole, {'path': path, 'is_dir': isdir, 'fs_id': fs_id})
+                # 保存完整的文件信息到 UserRole（包括 size 和 server_mtime）
+                file_data = {
+                    'path': path,
+                    'is_dir': isdir,
+                    'fs_id': fs_id,
+                    'size': file.get('size', 0),
+                    'mtime': file.get('server_mtime', 0),  # 使用 server_mtime 字段
+                    'server_filename': server_filename
+                }
+                name_item.setData(Qt.UserRole, file_data)
 
                 tooltip_text = f"路径: {path}"
                 if not isdir:
@@ -2096,6 +2712,9 @@ class MainWindow(QMainWindow):
         self.current_worker = None
         # 重新启用所有按钮
         self._set_transfer_buttons_enabled(True)
+
+        # 刷新剪切状态的视觉效果
+        self._refresh_cut_visual_state()
 
     def on_directory_load_error(self, error_msg):
         self.is_loading_files = False  # 清除加载标志
