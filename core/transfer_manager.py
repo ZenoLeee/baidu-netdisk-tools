@@ -93,7 +93,7 @@ class TransferManager:
         self.tasks_loaded = False
 
         # 下载线程数限制
-        self.max_download_threads = 4  # 默认值，会被配置覆盖
+        self.max_download_threads = 5
         self.download_semaphore = threading.BoundedSemaphore(self.max_download_threads)
 
         # 启动进度更新线程

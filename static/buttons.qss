@@ -59,6 +59,8 @@ QPushButton#authbut {
     background-color: #2196F3;
     color: white;
     border: 1px solid #2196F3;
+    padding: 4px 8px;
+    font-size: 12px;
 }
 
 QPushButton#authbut:hover {
@@ -89,6 +91,8 @@ QPushButton#uploadBtn {
     background-color: #2196F3;
     color: white;
     border-color: #2196F3;
+    padding: 4px 8px;
+    font-size: 12px;
 }
 
 QPushButton#uploadBtn:hover {
@@ -111,6 +115,8 @@ QPushButton#downloadBtn:hover {
 /* 新建文件夹按钮 */
 QPushButton#createDir {
     width: 100px;
+    padding: 4px 8px;
+    font-size: 12px;
 }
 
 /* 警告按钮 */
@@ -154,6 +160,8 @@ QPushButton#info {
     background-color: #2196F3;
     color: white;
     border-color: #2196F3;
+    padding: 4px 6px;
+    font-size: 12px;
 }
 
 QPushButton#info:hover {

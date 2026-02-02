@@ -35,7 +35,14 @@ DEFAULT_CONFIG = {
     'accounts': {},
     'current_account': None,
     'download_path': os.path.join(os.path.expanduser("~"), "Downloads"),  # 默认下载路径
-    'max_download_threads': 4,  # 最大下载线程数（1-8）
+    'max_download_threads': 4,
+    'share_config': {
+        'period': 7,
+        'pwd_type': 'random',
+        'custom_pwd': '',
+        'autofill': True
+    },
+    'share_format': '{url}'
 }
 
 
@@ -332,4 +339,43 @@ class ConfigManager:
         # 限制在1-8范围内
         threads = max(1, min(8, threads))
         self.set('max_download_threads', threads)
+        return self.save()
+    def get_share_config(self) -> Dict[str, Any]:
+        """获取分享配置
+
+        Returns:
+            分享配置字典，包含period, pwd_type, custom_pwd, autofill
+        """
+        return self.get('share_config', {
+            'period': 7,
+            'pwd_type': 'random',
+            'custom_pwd': '',
+            'autofill': True
+        })
+
+    def set_share_config(self, period: int = None, pwd_type: str = None,
+                        custom_pwd: str = None, autofill: bool = None) -> bool:
+        """设置分享配置
+
+        Args:
+            period: 有效期（天）
+            pwd_type: 提取码类型（random或custom）
+            custom_pwd: 自定义提取码
+            autofill: 是否自动填充提取码
+
+        Returns:
+            设置是否成功
+        """
+        config = self.get_share_config()
+
+        if period is not None:
+            config['period'] = period
+        if pwd_type is not None:
+            config['pwd_type'] = pwd_type
+        if custom_pwd is not None:
+            config['custom_pwd'] = custom_pwd
+        if autofill is not None:
+            config['autofill'] = autofill
+
+        self.set('share_config', config)
         return self.save()

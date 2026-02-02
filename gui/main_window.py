@@ -10,14 +10,16 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QAbstractItemView, QSizePolicy,
     QHeaderView, QShortcut, QFrame, QMenu, QMessageBox, QTableWidgetItem,
     QDialog, QStatusBar, QProgressBar, QAction, QFileDialog,
-    QInputDialog, QLineEdit, QProgressDialog, QListWidget, QListWidgetItem, QStyle, QToolTip, QComboBox
+    QLineEdit, QProgressDialog, QListWidget, QListWidgetItem,
+    QStyle, QToolTip, QComboBox, QGroupBox, QTextEdit, QScrollArea
 )
 from PyQt5.QtCore import (
     Qt, QTimer, QPoint, QRect
 )
-from PyQt5.QtGui import QIcon, QKeySequence, QCursor, QColor, QBrush
+from PyQt5.QtGui import QIcon, QKeySequence, QColor, QBrush
 
 from gui.login_dialog import LoginDialog
+from gui.share_dialog import ShareDialog
 from core.api_client import BaiduPanAPI
 from gui.style import AppStyles
 from utils.logger import get_logger
@@ -396,28 +398,32 @@ class MainWindow(QMainWindow):
         # 上传按钮
         self.upload_btn = QPushButton("📤 上传")
         self.upload_btn.setObjectName("uploadBtn")
-        self.upload_btn.setMaximumWidth(80)
+        self.upload_btn.setMaximumWidth(75)
+        self.upload_btn.setMinimumWidth(75)
         self.upload_btn.clicked.connect(self.upload_file)
         button_layout.addWidget(self.upload_btn)
 
         # 下载按钮
-        self.download_btn = QPushButton("📥 下载")
+        self.download_btn = QPushButton("⬇️ 下载")
         self.download_btn.setObjectName("authbut")
-        self.download_btn.setMaximumWidth(80)
+        self.download_btn.setMaximumWidth(75)
+        self.download_btn.setMinimumWidth(75)
         self.download_btn.clicked.connect(self.download_selected_file)
         button_layout.addWidget(self.download_btn)
 
         # 新建文件夹按钮
-        self.create_folder_btn = QPushButton("📁 新建文件夹")
+        self.create_folder_btn = QPushButton("📁 新建")
         self.create_folder_btn.setObjectName("createDir")
-        self.create_folder_btn.setMaximumWidth(115)
+        self.create_folder_btn.setMaximumWidth(70)
+        self.create_folder_btn.setMinimumWidth(70)
         self.create_folder_btn.clicked.connect(self.create_folder_dialog)
         button_layout.addWidget(self.create_folder_btn)
 
         # 刷新按钮
-        self.refresh_btn = QPushButton("🔄 刷新")
+        self.refresh_btn = QPushButton("🔄")
         self.refresh_btn.setObjectName("info")
-        self.refresh_btn.setMaximumWidth(80)
+        self.refresh_btn.setMaximumWidth(45)
+        self.refresh_btn.setMinimumWidth(45)
         self.refresh_btn.clicked.connect(lambda: self.update_items(self.current_path))
         button_layout.addWidget(self.refresh_btn)
 
@@ -699,11 +705,6 @@ class MainWindow(QMainWindow):
                 if data.get('is_dir'):
                     # 避免将文件夹移动到自己里面
                     if path == target_folder_path or path.startswith(target_folder_path.rstrip('/') + '/'):
-                        QMessageBox.warning(
-                            self,
-                            "移动失败",
-                            f"不能将文件夹移动到它自身或其子文件夹中"
-                        )
                         return
 
                 source_paths.append(path)
@@ -1969,6 +1970,8 @@ class MainWindow(QMainWindow):
                 # 文件和文件夹都显示"下载"
                 menu.addAction("⬇️ 下载", lambda: self.download_selected_file())
 
+                menu.addSeparator()
+                menu.addAction("🔗 分享", lambda: self.create_share_link(data))
                 menu.addSeparator()
                 menu.addAction("✏️ 重命名", lambda: self.rename_file(item))
                 menu.addAction("🗑️ 删除", lambda: self.delete_file(data))
@@ -3254,6 +3257,10 @@ class MainWindow(QMainWindow):
         settings_action.triggered.connect(self.show_download_settings_dialog)
         settings_menu.addAction(settings_action)
 
+        share_format_action = QAction('分享设置(&S)', self)
+        share_format_action.triggered.connect(self.show_share_format_settings_dialog)
+        settings_menu.addAction(share_format_action)
+
         # 帮助菜单
         help_menu = menubar.addMenu('帮助(&H)')
 
@@ -3474,6 +3481,200 @@ class MainWindow(QMainWindow):
 
         dialog.accept()
 
+
+    def show_share_format_settings_dialog(self):
+        """显示分享格式设置对话框"""
+        current_format = self.config.get('share_format', '{url}')
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('分享格式设置')
+        dialog.setFixedSize(700, 650)
+
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(15)
+        layout.setContentsMargins(25, 25, 25, 25)
+
+        # 标题
+        title = QLabel('自定义分享链接格式')
+        title.setStyleSheet('font-size: 18px; font-weight: bold; color: #333;')
+        layout.addWidget(title)
+
+        # 说明
+        desc = QLabel('使用 {url} 和 {pwd} 作为变量，支持多行输入和表情符号 ✨')
+        desc.setStyleSheet('color: #666; font-size: 13px; padding: 8px; background-color: #f0f7ff; border-radius: 6px;')
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        # 显示当前格式（可编辑，支持多行）
+        format_group = QGroupBox('分享格式')
+        format_group.setStyleSheet('QGroupBox { font-size: 14px; font-weight: bold; color: #555; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px; }')
+        format_layout = QVBoxLayout()
+        format_layout.setSpacing(8)
+
+        self.format_display = QTextEdit()
+        self.format_display.setPlainText(current_format)
+        self.format_display.setPlaceholderText('输入分享格式，例如：{url}')
+        # 固定高度，宽度自适应
+        self.format_display.setFixedHeight(100)
+        self.format_display.setStyleSheet('''
+            QTextEdit {
+                padding: 10px;
+                border: 2px solid #ddd;
+                border-radius: 6px;
+                background-color: white;
+                font-size: 13px;
+                font-family: Consolas, monospace;
+            }
+            QTextEdit:focus {
+                border: 2px solid #2196F3;
+            }
+        ''')
+        # 启用滚动条
+        self.format_display.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.format_display.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.format_display.setLineWrapMode(QTextEdit.NoWrap)
+        self.format_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # 文本变化时自动更新预览
+        self.format_display.textChanged.connect(lambda: self.update_format_preview())
+        format_layout.addWidget(self.format_display)
+
+        format_group.setLayout(format_layout)
+        layout.addWidget(format_group)
+
+        # 预览标签（带滚动条）
+        preview_group = QGroupBox('实时预览')
+        preview_group.setStyleSheet('QGroupBox { font-size: 14px; font-weight: bold; color: #555; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px; }')
+        preview_layout = QVBoxLayout()
+        preview_layout.setSpacing(8)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFixedHeight(128)  # 120px高度 + 8px边距
+        scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # 优化滚动区域样式
+        scroll_area.setStyleSheet('''
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QScrollArea > QWidget > QWidget {
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+            }
+        ''')
+
+        self.preview_label = QLabel('预览: https://pan.baidu.com/s/1BsObTtET2dl_8xeRIlc2Ew')
+        self.preview_label.setWordWrap(True)
+        self.preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.preview_label.setStyleSheet('''
+            QLabel {
+                padding: 16px;
+                background-color: transparent;
+                font-size: 13px;
+                font-family: Consolas, monospace;
+                color: #495057;
+                line-height: 1.6;
+            }
+        ''')
+        scroll_area.setWidget(self.preview_label)
+        preview_layout.addWidget(scroll_area)
+
+        preview_group.setLayout(preview_layout)
+        layout.addWidget(preview_group)
+
+        # 按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        cancel_btn = QPushButton('取消')
+        cancel_btn.setFixedSize(120, 36)
+        cancel_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #f5f5f5;
+                color: #666;
+                border: 1px solid #ddd;
+                border-radius: 6px;
+                font-size: 14px;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: #e9ecef;
+                border-color: #ccc;
+            }
+            QPushButton:pressed {
+                background-color: #dee2e6;
+            }
+        ''')
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        save_btn = QPushButton('保存')
+        save_btn.setFixedSize(120, 36)
+        save_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #1565C0;
+            }
+        ''')
+        save_btn.clicked.connect(lambda: self.save_share_format_settings(dialog))
+        btn_layout.addWidget(save_btn)
+
+        layout.addLayout(btn_layout)
+
+        # 初始化时自动更新预览
+        self.update_format_preview()
+
+        dialog.exec_()
+
+    def update_format_preview(self):
+        """更新预览"""
+        format_template = self.format_display.toPlainText().strip()
+        if not format_template:
+            self.preview_label.setText('请输入分享格式')
+            return
+
+        # 示例数据
+        example_url = 'https://pan.baidu.com/s/1BsObTtET2dl_8xeRIlc2Ew'
+        example_pwd = 'csy7'
+
+        try:
+            preview = format_template.replace('{url}', example_url).replace('{pwd}', example_pwd)
+            self.preview_label.setText(f'{preview}')
+        except Exception as e:
+            self.preview_label.setText(f'格式错误')
+
+    def save_share_format_settings(self, dialog):
+        """保存分享格式"""
+        new_format = self.format_display.toPlainText().strip()
+
+        if not new_format:
+            QMessageBox.warning(dialog, '警告', '分享格式不能为空')
+            return
+
+        if '{url}' not in new_format:
+            QMessageBox.warning(dialog, '警告', '分享格式必须包含 {url} 变量')
+            return
+
+        self.config.set('share_format', new_format)
+        if not self.config.save():
+            QMessageBox.critical(dialog, '错误', '保存失败')
+            return
+
+        self.status_label.setText(f'分享格式已保存')
+        dialog.accept()
+
     def show_about_dialog(self):
         dialog = QDialog(self)
         dialog.setWindowTitle('关于')
@@ -3559,3 +3760,8 @@ class MainWindow(QMainWindow):
         QApplication.restoreOverrideCursor()
         self.file_table.setEnabled(True)
         self.statusBar().showMessage("操作已取消", 2000)
+
+    def create_share_link(self, file_data):
+        """创建分享链接"""
+        dialog = ShareDialog(file_data, self.api_client, self.config)
+        dialog.exec_()

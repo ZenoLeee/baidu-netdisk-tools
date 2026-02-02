@@ -4,6 +4,8 @@ API客户端模块
 import os
 import json
 import time
+import random
+import string
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
@@ -1251,3 +1253,94 @@ class BaiduPanAPI:
         except IOError as e:
             logger.error(f"写入文件失败: {e}")
             return {'success': False, 'error': f'写入文件失败: {e}'}
+
+    def create_share_link(self, fs_ids: List[str], period: int = 7, pwd: str = None, remark: str = '') -> Dict[str, Any]:
+        """
+        创建分享链接
+
+        Args:
+            fs_ids: 文件ID列表
+            period: 分享有效期（天），默认7天，最大365天
+            pwd: 分享密码（4位，数字+小写字母），如果为None则自动生成
+            remark: 分享备注
+
+        Returns:
+            包含分享链接信息的响应数据
+        """
+        if not self.is_authenticated():
+            return {'success': False, 'error': '未登录或无权限访问'}
+
+        # 自动生成密码
+        if not pwd:
+            pwd = ''.join(random.choices(string.digits + string.ascii_lowercase, k=4))
+
+        # 验证密码格式
+        if len(pwd) != 4 or not all(c in string.digits + string.ascii_lowercase for c in pwd):
+            return {'success': False, 'error': '密码必须是4位数字或小写字母'}
+
+        # 验证有效期
+        if period < 1 or period > 365:
+            return {'success': False, 'error': '有效期必须在1-365天之间'}
+
+        # 准备请求参数
+        # 注意：使用正确的API端点 /apaas/1.0/share/set
+        url = f"{self.host}/apaas/1.0/share/set?product=netdisk&appid={self.client_id}&access_token={self.access_token}"
+
+        # 构造请求体
+        # 注意：fsid_list 必须是字符串数组格式，如 ["123456", "789012"]
+        data = {
+            'fsid_list': json.dumps([str(fs_id) for fs_id in fs_ids]),
+            'period': str(period),  # 转为字符串
+            'pwd': pwd
+        }
+
+        if remark:
+            data['remark'] = remark
+
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'pan.baidu.com'
+        }
+
+        logger.info(f"创建分享链接: fs_ids={fs_ids}, period={period}, pwd={pwd}")
+
+        try:
+            response = requests.post(url, data=data, headers=headers, timeout=self.timeout)
+            result = response.json()
+
+            logger.info(f"创建分享链接完整响应: {result}")
+            logger.debug(f"创建分享链接响应: {result}")
+
+            if result.get('errno') == 0:
+                share_data = result.get('data', {})
+                if share_data:
+                    return {
+                        'success': True,
+                        'data': share_data,
+                        'link': share_data.get('link', ''),
+                        'short_url': share_data.get('short_url', ''),
+                        'share_id': share_data.get('share_id', ''),
+                        'pwd': share_data.get('pwd', pwd),
+                        'period': share_data.get('period', period),
+                        'remark': share_data.get('remark', '')
+                    }
+                else:
+                    return {'success': False, 'error': '未返回分享信息'}
+            else:
+                error_msg = result.get('show_msg', '创建分享链接失败')
+                errno = result.get('errno', -1)
+                logger.error(f"创建分享链接失败: {error_msg}, errno: {errno}")
+
+                # 检查是否是权限问题
+                if errno == 31334 or errno == 31336:
+                    return {'success': False, 'error': '此功能需要购买文件分享服务', 'error_code': 'SERVICE_NOT_PURCHASED'}
+
+                return {'success': False, 'error': error_msg, 'error_code': errno}
+
+        except requests.RequestException as e:
+            logger.error(f"创建分享链接请求失败: {e}")
+            return {'success': False, 'error': str(e)}
+        except Exception as e:
+            logger.error(f"创建分享链接异常: {e}")
+            return {'success': False, 'error': str(e)}
+
