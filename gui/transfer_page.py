@@ -132,6 +132,8 @@ class TransferPage(QWidget):
         download_menu.addAction("下载 requirements.txt", lambda: self.test_download_file("/requirements.txt"))
         download_menu.addAction("下载 test.mp3", lambda: self.test_download_file("/test.mp3"))
         download_menu.addAction("下载 test_upload_967z8qnx.dat", lambda: self.test_download_file("/test_upload_967z8qnx.dat"))
+        download_menu.addSeparator()
+        download_menu.addAction("下载文件夹: 北京话事人", lambda: self.test_download_folder("/荔枝/北京话事人", "北京话事人"))
         self.test_download_btn.setMenu(download_menu)
         top_layout.addWidget(self.test_download_btn)
 
@@ -185,7 +187,7 @@ class TransferPage(QWidget):
         # 统计信息
         all_tasks = self.transfer_manager.get_tasks()
         total = len(all_tasks)
-        active = len([t for t in all_tasks if t.status in ["上传中", "下载中", "分片上传中"]])
+        active = len([t for t in all_tasks if t.status in ["上传中", "下载中", "分片上传中", "扫描中"]])
         completed = len([t for t in all_tasks if t.status == "完成"])
         total_speed = sum([t.speed for t in all_tasks])
 
@@ -270,10 +272,39 @@ class TransferPage(QWidget):
             # 分片上传时显示分片信息
             if task.status == "分片上传中" and task.total_chunks > 0:
                 progress_bar.setFormat(f"{task.progress:.1f}% ({task.current_chunk + 1}/{task.total_chunks}片)")
+            elif task.is_folder and task.current_known_size > 0:
+                # 文件夹任务显示已完成/总大小
+                completed_size = task.completed_size if hasattr(task, 'completed_size') else 0
+                total_size = task.current_known_size
+
+                # 根据大小选择单位（超过1GB使用GB，否则使用MB）
+                if total_size >= 1024 * 1024 * 1024:
+                    completed_val = completed_size / (1024 * 1024 * 1024)
+                    total_val = total_size / (1024 * 1024 * 1024)
+                    unit = "GB"
+                else:
+                    completed_val = completed_size / (1024 * 1024)
+                    total_val = total_size / (1024 * 1024)
+                    unit = "MB"
+
+                progress_bar.setFormat(f"{task.progress:.1f}% ({completed_val:.1f}/{total_val:.1f}{unit})")
             else:
                 progress_bar.setFormat(f"{task.progress:.1f}%")
 
-            progress_bar.setStyleSheet(AppStyles.get_progress_bar_style(task.status))
+            # 根据任务状态映射到进度条样式状态
+            style_status = 'active'  # 默认：活跃状态
+            if task.status in ["上传中", "下载中", "分片上传中", "扫描中"]:
+                style_status = 'active'
+            elif task.status == "完成":
+                style_status = 'success'
+            elif task.status in ["失败", "已取消"]:
+                style_status = 'error'
+            elif task.status in ["已暂停", "已暂停（可断点续传）"]:
+                style_status = 'paused'
+            elif task.status == "等待中":
+                style_status = 'paused'  # 等待中也使用暂停样式（灰色）
+
+            progress_bar.setStyleSheet(AppStyles.get_progress_bar_style(style_status))
 
             # 更新速度显示
             if speed_label:
@@ -290,8 +321,11 @@ class TransferPage(QWidget):
 
             table.setCellWidget(row, 1, progress_widget)
 
-            # 文件大小
-            size_text = FileUtils.format_size(task.size)
+            # 文件大小（文件夹任务使用 current_known_size）
+            if task.is_folder:
+                size_text = FileUtils.format_size(task.current_known_size)
+            else:
+                size_text = FileUtils.format_size(task.size)
             size_item = QTableWidgetItem(size_text)
             table.setItem(row, 2, size_item)
 
@@ -304,7 +338,7 @@ class TransferPage(QWidget):
                 status_item.setForeground(QColor("#4CAF50"))
             elif task.status == "失败":
                 status_item.setForeground(QColor("#F44336"))
-            elif task.status in ["上传中", "下载中", "分片上传中"]:
+            elif task.status in ["上传中", "下载中", "分片上传中", "扫描中"]:
                 status_item.setForeground(QColor("#2196F3"))
             elif task.status in ["已暂停", "已暂停（可断点续传）"]:
                 status_item.setForeground(QColor("#FF9800"))
@@ -320,7 +354,7 @@ class TransferPage(QWidget):
             button_layout.setSpacing(5)
 
             # 暂停/继续按钮
-            if task.status in ["上传中", "下载中", "分片上传中"]:
+            if task.status in ["上传中", "下载中", "分片上传中", "扫描中"]:
                 pause_label = QLabel("⏸")
                 pause_label.setObjectName("actionLabel")
                 pause_label.setToolTip("暂停")
@@ -412,12 +446,20 @@ class TransferPage(QWidget):
             return
 
         # 根据状态决定是暂停还是开始
-        if task.status in ["上传中", "下载中", "分片上传中", "等待中"]:
+        if task.status in ["上传中", "下载中", "分片上传中", "扫描中", "等待中"]:
             # 正在运行/等待中 -> 暂停
             self.pause_task(task_id)
         elif task.status in ["已暂停", "已暂停（可断点续传）"]:
-            # 已暂停 -> 继续
-            self.resume_task(task_id)
+            # 已暂停 -> 继续（需要确认，防止误操作）
+            reply = QMessageBox.question(
+                self,
+                "确认继续",
+                f"是否继续任务：{task.name}？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.resume_task(task_id)
 
     def switch_transfer_tab(self, tab_type):
         """切换传输标签页"""
@@ -593,11 +635,8 @@ class TransferPage(QWidget):
         """继续任务"""
         task = self.transfer_manager.get_task(task_id)
         if task and task.status in ["已暂停", "已暂停（可断点续传）", "等待中"]:
-            # 根据任务类型选择启动方法
-            if task.type == 'upload':
-                self.start_upload_task(task)
-            elif task.type == 'download':
-                self.start_download_task(task)
+            # 直接调用 transfer_manager 的 resume_task，它会自动判断任务类型（包括文件夹）
+            self.transfer_manager.resume_task(task_id)
 
     def cancel_task(self, task_id):
         """取消任务"""
@@ -758,6 +797,67 @@ class TransferPage(QWidget):
             import traceback
             traceback.print_exc()
             QMessageBox.warning(self, "错误", f"测试下载失败: {str(e)}")
+
+    def test_download_folder(self, folder_path, folder_name):
+        """测试下载文件夹
+
+        Args:
+            folder_path: 远程文件夹路径
+            folder_name: 文件夹名称
+        """
+        from utils.config_manager import ConfigManager
+
+        # 检查是否有api_client
+        if not self.parent_window or not self.parent_window.api_client:
+            QMessageBox.warning(self, "提示", "请先登录百度网盘账号")
+            return
+
+        # 获取默认下载路径
+        config = ConfigManager()
+        default_download_dir = config.get_download_path()
+
+        # 确保目录存在
+        if not os.path.exists(default_download_dir):
+            try:
+                os.makedirs(default_download_dir)
+                logger.info(f"创建默认下载目录: {default_download_dir}")
+            except Exception as e:
+                logger.error(f"创建下载目录失败: {e}")
+                QMessageBox.warning(self, "错误", f"创建下载目录失败: {str(e)}")
+                return
+
+        logger.info(f"=" * 50)
+        logger.info(f"测试下载文件夹: {folder_name}")
+        logger.info(f"远程路径: {folder_path}")
+        logger.info(f"保存目录: {default_download_dir}")
+        logger.info(f"=" * 50)
+
+        try:
+            # 使用 TransferManager 创建文件夹下载任务
+            task = self.transfer_manager.add_folder_download_task(
+                folder_name=folder_name,
+                folder_path=folder_path,
+                local_save_dir=default_download_dir,
+                api_client=self.parent_window.api_client
+            )
+
+            if task:
+                logger.info(f"✅ 文件夹下载任务已创建")
+                # 显示完整的保存路径到状态栏
+                full_message = f"已添加文件夹下载任务: {folder_name} → {default_download_dir}"
+                if self.parent_window and hasattr(self.parent_window, 'status_label'):
+                    self.parent_window.status_label.setText(full_message)
+                    # 10秒后恢复
+                    QTimer.singleShot(10000, lambda: self.parent_window.status_label.setText("就绪"))
+            else:
+                logger.error(f"❌ 添加文件夹下载任务失败")
+                QMessageBox.warning(self, "错误", "添加文件夹下载任务失败")
+
+        except Exception as e:
+            logger.error(f"测试下载文件夹失败: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "错误", f"测试下载文件夹失败: {str(e)}")
 
     def create_and_upload_test_file(self, file_name, remote_path, size_mb):
         """创建并上传测试文件

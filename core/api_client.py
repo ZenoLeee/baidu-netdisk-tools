@@ -1096,7 +1096,7 @@ class BaiduPanAPI:
             logger.error(f"写入文件失败: {e}")
             return {'success': False, 'error': f'写入文件失败: {e}'}
 
-    def download_file_with_resume(self, dlink: str, local_path: str, task=None) -> Dict[str, Any]:
+    def download_file_with_resume(self, dlink: str, local_path: str, task=None, progress_callback=None) -> Dict[str, Any]:
         """
         支持断点续传的文件下载
 
@@ -1104,6 +1104,7 @@ class BaiduPanAPI:
             dlink: 文件下载链接
             local_path: 本地保存路径
             task: 下载任务对象（用于更新进度）
+            progress_callback: 进度回调函数(progress, downloaded_size)，用于文件夹下载等场景
 
         Returns:
             下载结果
@@ -1228,6 +1229,10 @@ class BaiduPanAPI:
                             # 更新进度
                             if total_size > 0:
                                 task.progress = (downloaded_size / total_size) * 100
+
+                                # 如果有进度回调，调用它
+                                if progress_callback:
+                                    progress_callback(task.progress, downloaded_size)
 
                             # 更新记录
                             last_update_time = current_time

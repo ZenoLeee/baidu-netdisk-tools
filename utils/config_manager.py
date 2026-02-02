@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     'accounts': {},
     'current_account': None,
     'download_path': os.path.join(os.path.expanduser("~"), "Downloads"),  # 默认下载路径
+    'max_download_threads': 4,  # 最大下载线程数（1-8）
 }
 
 
@@ -307,4 +308,28 @@ class ConfigManager:
             设置是否成功
         """
         self.set('download_path', path)
+        return self.save()
+
+    def get_max_download_threads(self) -> int:
+        """获取最大下载线程数
+
+        Returns:
+            最大下载线程数（1-8）
+        """
+        threads = self.get('max_download_threads', 4)
+        # 确保在有效范围内
+        return max(1, min(8, threads))
+
+    def set_max_download_threads(self, threads: int) -> bool:
+        """设置最大下载线程数
+
+        Args:
+            threads: 线程数（1-8）
+
+        Returns:
+            设置是否成功
+        """
+        # 限制在1-8范围内
+        threads = max(1, min(8, threads))
+        self.set('max_download_threads', threads)
         return self.save()

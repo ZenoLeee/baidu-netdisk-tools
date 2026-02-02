@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QAbstractItemView, QSizePolicy,
     QHeaderView, QShortcut, QFrame, QMenu, QMessageBox, QTableWidgetItem,
     QDialog, QStatusBar, QProgressBar, QAction, QFileDialog,
-    QInputDialog, QLineEdit, QProgressDialog, QListWidget, QListWidgetItem, QStyle, QToolTip
+    QInputDialog, QLineEdit, QProgressDialog, QListWidget, QListWidgetItem, QStyle, QToolTip, QComboBox
 )
 from PyQt5.QtCore import (
     Qt, QTimer, QPoint, QRect
@@ -59,6 +59,10 @@ class MainWindow(QMainWindow):
 
         # 传输管理器
         self.transfer_manager = TransferManager()
+        # 读取下载线程数配置
+        max_threads = self.config.get_max_download_threads()
+        self.transfer_manager.update_download_thread_limit(max_threads)
+        logger.info(f"初始化下载线程数限制: {max_threads}")
 
         # 版本管理器
         self.version_manager = VersionManager()
@@ -1355,7 +1359,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"文件上传完成: {task.name} -> {task.remote_path}")
 
     def download_selected_file(self):
-        """下载选中的文件"""
+        """下载选中的文件或文件夹"""
         from utils.config_manager import ConfigManager
 
         # 检查是否正在加载文件或切换账号
@@ -1364,7 +1368,7 @@ class MainWindow(QMainWindow):
 
         selected_items = self.file_table.selectedItems()
         if not selected_items:
-            QMessageBox.warning(self, "提示", "请先选择一个文件")
+            QMessageBox.warning(self, "提示", "请先选择一个文件或文件夹")
             return
 
         # 获取第一个选中的文件
@@ -1373,62 +1377,69 @@ class MainWindow(QMainWindow):
 
         # 获取文件信息
         name_item = self.file_table.item(row, 0)
-        size_item = self.file_table.item(row, 1)
 
         if not name_item:
             return
 
         data = name_item.data(Qt.UserRole)
-        if not data or data.get('is_dir'):
-            QMessageBox.warning(self, "提示", "请选择一个文件，而不是文件夹")
+        if not data:
+            QMessageBox.warning(self, "提示", "无法获取文件信息")
             return
 
-        # 获取文件大小
-        size_text = size_item.text() if size_item else "0"
-        size = self.parse_size(size_text)
+        # 判断是文件夹还是文件
+        if data.get('is_dir'):
+            # 文件夹下载
+            self.download_folder(name_item, data['path'])
+        else:
+            # 文件下载
+            size_item = self.file_table.item(row, 1)
 
-        # 获取文件名
-        file_name = name_item.text()
+            # 获取文件大小
+            size_text = size_item.text() if size_item else "0"
+            size = self.parse_size(size_text)
 
-        # 获取默认下载路径
-        config = ConfigManager()
-        default_download_dir = config.get_download_path()
+            # 获取文件名
+            file_name = name_item.text()
 
-        # 确保目录存在
-        if not os.path.exists(default_download_dir):
-            try:
-                os.makedirs(default_download_dir)
-                logger.info(f"创建默认下载目录: {default_download_dir}")
-            except Exception as e:
-                logger.error(f"创建下载目录失败: {e}")
-                QMessageBox.warning(self, "错误", f"创建下载目录失败: {str(e)}")
-                return
+            # 获取默认下载路径
+            config = ConfigManager()
+            default_download_dir = config.get_download_path()
 
-        # 构建保存路径
-        save_path = os.path.join(default_download_dir, file_name)
+            # 确保目录存在
+            if not os.path.exists(default_download_dir):
+                try:
+                    os.makedirs(default_download_dir)
+                    logger.info(f"创建默认下载目录: {default_download_dir}")
+                except Exception as e:
+                    logger.error(f"创建下载目录失败: {e}")
+                    QMessageBox.warning(self, "错误", f"创建下载目录失败: {str(e)}")
+                    return
 
-        # 如果文件已存在，添加数字后缀避免覆盖
-        if os.path.exists(save_path):
-            base_name, ext = os.path.splitext(file_name)
-            counter = 1
-            while os.path.exists(save_path):
-                new_name = f"{base_name}_{counter}{ext}"
-                save_path = os.path.join(default_download_dir, new_name)
-                counter += 1
-            logger.info(f"文件已存在，使用新名称: {os.path.basename(save_path)}")
+            # 构建保存路径
+            save_path = os.path.join(default_download_dir, file_name)
 
-        logger.info(f"文件管理下载按钮: {file_name} -> {save_path}")
+            # 如果文件已存在，添加数字后缀避免覆盖
+            if os.path.exists(save_path):
+                base_name, ext = os.path.splitext(file_name)
+                counter = 1
+                while os.path.exists(save_path):
+                    new_name = f"{base_name}_{counter}{ext}"
+                    save_path = os.path.join(default_download_dir, new_name)
+                    counter += 1
+                logger.info(f"文件已存在，使用新名称: {os.path.basename(save_path)}")
 
-        # 添加下载任务（指定保存路径）
-        task = self.transfer_page.add_download_task(
-            file_name,
-            data['path'],
-            size,
-            save_path
-        )
+            logger.info(f"文件管理下载按钮: {file_name} -> {save_path}")
 
-        # 显示通知
-        self.status_label.setText(f"已添加下载任务: {file_name}")
+            # 添加下载任务（指定保存路径）
+            task = self.transfer_page.add_download_task(
+                file_name,
+                data['path'],
+                size,
+                save_path
+            )
+
+            # 显示通知
+            self.status_label.setText(f"已添加下载任务: {file_name}")
 
     @staticmethod
     def parse_size(size_str):
@@ -1955,8 +1966,8 @@ class MainWindow(QMainWindow):
                 menu.addAction("📋 粘贴", self.paste_files)
 
             if data:
-                if not data.get('is_dir'):
-                    menu.addAction("⬇️ 下载", lambda: self.download_file(item, data['path']))
+                # 文件和文件夹都显示"下载"
+                menu.addAction("⬇️ 下载", lambda: self.download_selected_file())
 
                 menu.addSeparator()
                 menu.addAction("✏️ 重命名", lambda: self.rename_file(item))
@@ -2438,6 +2449,63 @@ class MainWindow(QMainWindow):
             return
 
         self._execute_download(item, path)
+
+    def download_folder(self, item, path):
+        """下载整个文件夹"""
+        # 检查是否有操作正在进行
+        if self.is_operation_in_progress:
+            logger.info(f"操作进行中，忽略下载请求")
+            return
+
+        data = item.data(Qt.UserRole)
+        if not data or not data.get('is_dir'):
+            logger.warning("下载文件夹失败：不是文件夹")
+            return
+
+        # 直接开始下载，不需要确认
+        folder_name = item.text()
+        self.status_label.setText(f"正在下载文件夹 '{folder_name}'...")
+
+        # 获取默认下载路径
+        from utils.config_manager import ConfigManager
+        config = ConfigManager()
+        default_download_dir = config.get_download_path()
+
+        # 确保目录存在
+        if not os.path.exists(default_download_dir):
+            try:
+                os.makedirs(default_download_dir)
+                logger.info(f"创建默认下载目录: {default_download_dir}")
+            except Exception as e:
+                logger.error(f"创建下载目录失败: {e}")
+                QMessageBox.warning(self, "错误", f"创建下载目录失败: {str(e)}")
+                return
+
+        # 使用 TransferManager 创建文件夹下载任务
+        try:
+            task = self.transfer_manager.add_folder_download_task(
+                folder_name=folder_name,
+                folder_path=path,
+                local_save_dir=default_download_dir,
+                api_client=self.api_client
+            )
+
+            if task:
+                self.status_label.setText(f"已添加文件夹下载任务: {folder_name}")
+                logger.info(f"文件夹下载任务已创建: {folder_name}")
+            else:
+                QMessageBox.warning(self, "下载失败", "创建文件夹下载任务失败")
+                self.status_label.setText("文件夹下载任务创建失败")
+
+        except Exception as e:
+            logger.error(f"创建文件夹下载任务异常: {e}")
+            QMessageBox.warning(self, "下载失败", f"创建文件夹下载任务失败: {str(e)}")
+            self.status_label.setText("文件夹下载任务创建失败")
+
+    def _format_size(self, size_bytes):
+        """格式化文件大小"""
+        from utils.file_utils import FileUtils
+        return FileUtils.format_size(size_bytes)
 
     def _set_transfer_buttons_enabled(self, enabled):
         """设置传输页面按钮的启用状态"""
@@ -3182,9 +3250,9 @@ class MainWindow(QMainWindow):
         # 设置菜单
         settings_menu = menubar.addMenu('设置(&S)')
 
-        download_path_action = QAction('设置下载目录(&D)', self)
-        download_path_action.triggered.connect(self.show_download_path_dialog)
-        settings_menu.addAction(download_path_action)
+        settings_action = QAction('下载设置(&D)', self)
+        settings_action.triggered.connect(self.show_download_settings_dialog)
+        settings_menu.addAction(settings_action)
 
         # 帮助菜单
         help_menu = menubar.addMenu('帮助(&H)')
@@ -3199,38 +3267,135 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
 
-    def show_download_path_dialog(self):
-        """显示设置下载目录对话框"""
-        # 获取当前下载目录
+    def show_download_settings_dialog(self):
+        """显示下载设置对话框（合并下载目录和线程数设置）"""
+        # 获取当前设置
         current_path = self.config.get_download_path()
+        current_threads = self.config.get_max_download_threads()
 
         # 创建对话框
         dialog = QDialog(self)
-        dialog.setWindowTitle('设置下载目录')
-        dialog.setFixedSize(500, 150)
+        dialog.setWindowTitle('下载设置')
+        dialog.setFixedSize(520, 400)
 
         layout = QVBoxLayout(dialog)
         layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
 
-        # 说明标签
-        info_label = QLabel('请选择默认的文件下载目录:')
-        layout.addWidget(info_label)
+        # ====== 下载目录设置 ======
+        path_group = QFrame()
+        path_group.setFrameStyle(QFrame.StyledPanel | QFrame.Raised)
+        path_layout = QVBoxLayout(path_group)
+        path_layout.setSpacing(10)
+        path_layout.setContentsMargins(15, 15, 15, 15)
 
-        # 路径显示和选择区域
-        path_layout = QHBoxLayout()
+        path_title = QLabel('📁 下载目录')
+        path_title.setStyleSheet('font-weight: bold; font-size: 13px;')
+        path_layout.addWidget(path_title)
 
-        self.path_input = QLineEdit(current_path)
-        self.path_input.setReadOnly(True)
-        path_layout.addWidget(self.path_input)
+        path_info = QLabel('选择默认的文件下载保存位置:')
+        path_info.setStyleSheet('color: #666;')
+        path_layout.addWidget(path_info)
+
+        # 路径输入和浏览按钮
+        path_input_layout = QHBoxLayout()
+        self.settings_path_input = QLineEdit(current_path)
+        self.settings_path_input.setReadOnly(True)
+        path_input_layout.addWidget(self.settings_path_input)
 
         browse_btn = QPushButton('浏览...')
         browse_btn.clicked.connect(lambda: self.browse_download_folder(dialog))
         browse_btn.setMinimumWidth(80)
-        path_layout.addWidget(browse_btn)
+        path_input_layout.addWidget(browse_btn)
 
-        layout.addLayout(path_layout)
+        path_layout.addLayout(path_input_layout)
+        layout.addWidget(path_group)
 
-        # 按钮区域
+        # ====== 下载线程数设置 ======
+        threads_group = QFrame()
+        threads_group.setFrameStyle(QFrame.StyledPanel | QFrame.Raised)
+        threads_layout = QVBoxLayout(threads_group)
+        threads_layout.setSpacing(10)
+        threads_layout.setContentsMargins(15, 15, 15, 15)
+
+        threads_title = QLabel('⚡ 下载线程数')
+        threads_title.setStyleSheet('font-weight: bold; font-size: 13px;')
+        threads_layout.addWidget(threads_title)
+
+        threads_info = QLabel('文件夹下载时的最大并发线程数（1-8）:')
+        threads_info.setStyleSheet('color: #666;')
+        threads_layout.addWidget(threads_info)
+
+        # 线程数选择
+        threads_select_layout = QHBoxLayout()
+        threads_select_layout.addWidget(QLabel('线程数:'))
+
+        self.thread_combo = QComboBox()
+        self.thread_combo.addItems(['1', '2', '3', '4', '5', '6', '7', '8'])
+        self.thread_combo.setCurrentIndex(current_threads - 1)
+        self.thread_combo.setMaximumWidth(90)
+        self.thread_combo.setMinimumWidth(90)
+        self.thread_combo.setStyleSheet('''
+            QComboBox {
+                padding: 4px 6px 4px 8px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                background: white;
+                font-size: 12px;
+            }
+            QComboBox:hover {
+                border-color: #2196F3;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 26px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 4px solid #666;
+                width: 0;
+                height: 0;
+                margin-right: 6px;
+            }
+            QComboBox QAbstractItemView {
+                border: 1px solid #ccc;
+                selection-background-color: #2196F3;
+                selection-color: white;
+            }
+        ''')
+        threads_select_layout.addWidget(self.thread_combo)
+        threads_select_layout.addStretch()
+
+        threads_layout.addLayout(threads_select_layout)
+
+        # 线程数说明
+        self.thread_description = QLabel()
+        self.thread_description.setStyleSheet('color: #2196F3; font-size: 11px; padding: 5px;')
+        self.thread_description.setText(f'{current_threads} 个线程 - 快速，默认设置')
+        threads_layout.addWidget(self.thread_description)
+
+        # 更新说明的函数
+        def update_thread_description(index):
+            thread_count = index + 1
+            descriptions = {
+                1: '1 个线程 - 最稳定，适合网络较慢的情况',
+                2: '2 个线程 - 稳定，适合日常使用',
+                3: '3 个线程 - 较快，推荐设置',
+                4: '4 个线程 - 快速，默认设置',
+                5: '5 个线程 - 很快',
+                6: '6 个线程 - 极速',
+                7: '7 个线程 - 极速（需要较好的网络）',
+                8: '8 个线程 - 最大并发，需要高速网络'
+            }
+            self.thread_description.setText(descriptions.get(thread_count, f'{thread_count} 个线程'))
+
+        self.thread_combo.currentIndexChanged.connect(update_thread_description)
+
+        layout.addWidget(threads_group)
+
+        # ====== 按钮区域 ======
         button_layout = QHBoxLayout()
         button_layout.addStretch()
 
@@ -3239,10 +3404,10 @@ class MainWindow(QMainWindow):
         cancel_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(cancel_btn)
 
-        save_btn = QPushButton('保存')
+        save_btn = QPushButton('保存设置')
         save_btn.setObjectName('authbut')
-        save_btn.setMinimumWidth(80)
-        save_btn.clicked.connect(lambda: self.save_download_path(dialog))
+        save_btn.setMinimumWidth(100)
+        save_btn.clicked.connect(lambda: self.save_download_settings(dialog))
         button_layout.addWidget(save_btn)
 
         layout.addLayout(button_layout)
@@ -3251,7 +3416,7 @@ class MainWindow(QMainWindow):
 
     def browse_download_folder(self, dialog):
         """浏览并选择下载文件夹"""
-        current_path = self.path_input.text()
+        current_path = self.settings_path_input.text()
         folder_path = QFileDialog.getExistingDirectory(
             dialog,
             '选择下载目录',
@@ -3259,12 +3424,14 @@ class MainWindow(QMainWindow):
         )
 
         if folder_path:
-            self.path_input.setText(folder_path)
+            self.settings_path_input.setText(folder_path)
 
-    def save_download_path(self, dialog):
-        """保存下载目录设置"""
-        new_path = self.path_input.text().strip()
+    def save_download_settings(self, dialog):
+        """保存下载设置（目录和线程数）"""
+        new_path = self.settings_path_input.text().strip()
+        thread_count = self.thread_combo.currentIndex() + 1
 
+        # 验证下载目录
         if not new_path:
             QMessageBox.warning(dialog, '警告', '下载目录不能为空')
             return
@@ -3288,12 +3455,24 @@ class MainWindow(QMainWindow):
             else:
                 return
 
-        # 保存设置
-        if self.config.set_download_path(new_path):
-            self.status_label.setText(f'下载目录已设置为: {new_path}')
-            dialog.accept()
-        else:
+        # 保存下载目录
+        if not self.config.set_download_path(new_path):
             QMessageBox.critical(dialog, '错误', '保存下载目录失败')
+            return
+
+        # 保存线程数
+        if not self.config.set_max_download_threads(thread_count):
+            QMessageBox.critical(dialog, '错误', '保存下载线程数失败')
+            return
+
+        # 更新 TransferManager 的线程数限制
+        self.transfer_manager.update_download_thread_limit(thread_count)
+
+        # 显示成功消息到状态栏
+        self.status_label.setText(f'下载设置已保存 - 目录: {new_path}, 线程数: {thread_count}')
+        logger.info(f"用户更新下载设置: 目录={new_path}, 线程数={thread_count}")
+
+        dialog.accept()
 
     def show_about_dialog(self):
         dialog = QDialog(self)

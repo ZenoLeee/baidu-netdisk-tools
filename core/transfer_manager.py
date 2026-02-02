@@ -65,6 +65,15 @@ class TransferTask:
     # 控制标志
     stop_event: Event = field(default_factory=Event)  # 用于控制暂停/停止
 
+    # 文件夹下载相关
+    is_folder: bool = False  # 是否是文件夹任务
+    current_known_size: int = 0  # 当前已知的文件夹总大小（动态增长）
+    completed_size: int = 0  # 已完成下载的总大小（用于计算进度）
+    base_completed_size: int = 0  # 已完整下载的文件总大小（不包括正在下载的文件）
+    sub_files: List[Dict] = field(default_factory=list)  # 子文件列表
+    folder_scan_complete: bool = False  # 文件夹扫描是否完成
+    progress_lock: threading.Lock = field(default_factory=threading.Lock)  # 进度更新锁
+
 
 class TransferManager:
     """传输管理器"""
@@ -83,6 +92,10 @@ class TransferManager:
         # 延迟恢复任务（等登录后再恢复）
         self.tasks_loaded = False
 
+        # 下载线程数限制
+        self.max_download_threads = 4  # 默认值，会被配置覆盖
+        self.download_semaphore = threading.BoundedSemaphore(self.max_download_threads)
+
         # 启动进度更新线程
         self.progress_update_running = True
         self.progress_thread = threading.Thread(target=self._update_slice_progress_loop, daemon=True)
@@ -92,6 +105,25 @@ class TransferManager:
         """确保断点续传数据目录存在"""
         if not os.path.exists(self.resume_data_dir):
             os.makedirs(self.resume_data_dir)
+
+    def set_upload_complete_callback(self, callback):
+        """设置上传完成回调函数"""
+        self.upload_complete_callback = callback
+
+    def update_download_thread_limit(self, max_threads: int):
+        """更新下载线程数限制
+
+        Args:
+            max_threads: 最大线程数（1-8）
+        """
+        # 限制在1-8范围内
+        max_threads = max(1, min(8, max_threads))
+
+        if max_threads != self.max_download_threads:
+            logger.info(f"更新下载线程数限制: {self.max_download_threads} -> {max_threads}")
+            self.max_download_threads = max_threads
+            # 更新信号量
+            self.download_semaphore = threading.BoundedSemaphore(max_threads)
 
     def set_upload_complete_callback(self, callback):
         """设置上传完成回调函数"""
@@ -352,6 +384,441 @@ class TransferManager:
         thread.daemon = True
         thread.start()
 
+    def _resume_folder_download(self, task: TransferTask):
+        """恢复文件夹下载任务"""
+        api_client = self.api_client
+        if not api_client:
+            logger.error("API客户端未初始化，无法恢复文件夹下载")
+            return
+
+        try:
+            # 重置速度
+            task.speed = 0
+
+            # 检查扫描是否完成
+            if not task.folder_scan_complete:
+                # 扫描未完成，重新开始扫描和下载
+                logger.info(f"文件夹扫描未完成，重新开始扫描: {task.name}")
+                thread = threading.Thread(target=self._download_folder, args=(task, api_client))
+                thread.daemon = True
+                thread.start()
+            else:
+                # 扫描已完成，只需要下载剩余文件
+                task.status = "下载中"
+                logger.info(f"恢复文件夹下载: {task.name}, 共 {len(task.sub_files)} 个文件, 总大小: {task.current_known_size}")
+
+                # 重新计算已完成大小和剩余文件列表
+                base_completed_size = 0  # 已完整下载的文件总大小
+                actual_completed_size = 0  # 实际已完成的总大小（包括部分下载）
+                remaining_files = []
+
+                for file_info in task.sub_files:
+                    local_file_path = os.path.join(file_info.get('local_folder', ''), file_info.get('name', ''))
+                    file_size = file_info.get('size', 0)
+
+                    if os.path.exists(local_file_path):
+                        # 文件已存在，检查大小
+                        try:
+                            local_size = os.path.getsize(local_file_path)
+                            if local_size >= file_size:
+                                # 文件已完整下载
+                                base_completed_size += file_size
+                                actual_completed_size += file_size
+                                logger.info(f"文件已完整下载，跳过: {file_info.get('name')} ({local_size}/{file_size} bytes)")
+                                continue
+                            else:
+                                # 文件部分下载（支持断点续传）
+                                actual_completed_size += local_size
+                                logger.info(f"文件部分下载，加入队列支持断点续传: {file_info.get('name')} ({local_size}/{file_size} bytes)")
+                                remaining_files.append(file_info)
+                        except Exception as e:
+                            logger.warning(f"检查本地文件失败: {local_file_path}, 错误: {e}")
+                            remaining_files.append(file_info)
+                    else:
+                        # 文件不存在，需要下载
+                        remaining_files.append(file_info)
+
+                # 更新已完成大小
+                with task.progress_lock:
+                    task.base_completed_size = base_completed_size
+                    task.completed_size = actual_completed_size
+                    # 重新计算进度
+                    if task.current_known_size > 0:
+                        task.progress = (actual_completed_size / task.current_known_size) * 100
+
+                logger.info(f"恢复进度: 已完成 {actual_completed_size}/{task.current_known_size} bytes ({task.progress:.1f}%), 剩余 {len(remaining_files)} 个文件需要下载")
+
+                # 为剩余文件启动下载线程
+                for file_info in remaining_files:
+                    # 检查是否需要暂停
+                    if task.stop_event.is_set():
+                        logger.info(f"检测到暂停信号，停止创建下载任务")
+                        self._set_status_if_not_cancelled(task, "已暂停")
+                        return
+
+                    # 启动后台线程下载文件（内部会使用信号量）
+                    download_thread = threading.Thread(
+                        target=self._download_file_in_folder_wrapper,
+                        args=(task, api_client, file_info)
+                    )
+                    download_thread.daemon = True
+                    download_thread.start()
+
+                # 启动监控线程
+                monitor_thread = threading.Thread(target=self._monitor_folder_download, args=(task,))
+                monitor_thread.daemon = True
+                monitor_thread.start()
+
+        except Exception as e:
+            task.status = "失败"
+            task.error_message = str(e)
+            logger.error(f"恢复文件夹下载失败: {task.name}, 错误: {e}")
+
+    def add_folder_download_task(self, folder_name: str, folder_path: str, local_save_dir: str, api_client) -> Optional[TransferTask]:
+        """添加文件夹下载任务"""
+        self.task_id_counter += 1
+        task = TransferTask(
+            task_id=self.task_id_counter,
+            name=folder_name,
+            remote_path=folder_path,
+            size=0,  # 初始大小为0，会动态增长
+            type='download',
+            local_path=local_save_dir,
+            is_folder=True,
+            current_known_size=0,
+            completed_size=0,
+            folder_scan_complete=False
+        )
+
+        self.tasks.append(task)
+        logger.info(f"创建文件夹下载任务: {folder_name}, 保存到: {local_save_dir}")
+
+        # 启动文件夹下载线程
+        thread = threading.Thread(target=self._download_folder, args=(task, api_client))
+        thread.daemon = True
+        thread.start()
+
+        return task
+
+    def _download_folder(self, task: TransferTask, api_client):
+        """下载文件夹（边扫描边下载）"""
+        try:
+            task.status = "扫描中"
+
+            # 创建本地保存目录
+            local_folder_path = os.path.join(task.local_path, task.name)
+            if not os.path.exists(local_folder_path):
+                os.makedirs(local_folder_path)
+                logger.info(f"创建本地文件夹: {local_folder_path}")
+
+            # 启动监控线程（在扫描开始前启动）
+            monitor_thread = threading.Thread(target=self._monitor_folder_download, args=(task,))
+            monitor_thread.daemon = True
+            monitor_thread.start()
+
+            # 递归扫描文件夹（扫描到文件后立即启动下载）
+            logger.info(f"开始扫描文件夹: {task.remote_path}")
+            task.status = "下载中"
+            self._scan_and_download_folder(task, api_client, task.remote_path, local_folder_path, task.name)
+
+            # 扫描完成
+            task.folder_scan_complete = True
+            total_files = len(task.sub_files)
+            total_size = task.current_known_size
+            logger.info(f"文件夹扫描完成: {task.name}, 共 {total_files} 个文件, 总大小: {total_size}")
+
+            # 检查是否在扫描过程中被暂停
+            if task.stop_event.is_set():
+                self._set_status_if_not_cancelled(task, "已暂停")
+                logger.info(f"文件夹下载被暂停: {task.name}")
+                return
+
+        except Exception as e:
+            task.status = "失败"
+            task.error_message = str(e)
+            logger.error(f"文件夹下载异常: {task.name}, 错误: {e}")
+
+    def _scan_and_download_folder(self, task: TransferTask, api_client, remote_folder_path: str, local_folder_path: str, relative_path: str):
+        """递归扫描文件夹并立即下载文件"""
+        logger.info(f"扫描文件夹: {remote_folder_path}")
+        start = 0
+        limit = 100
+
+        while True:
+            # 检查是否需要暂停
+            if task.stop_event.is_set():
+                logger.info(f"检测到暂停信号，停止扫描文件夹: {remote_folder_path}")
+                if task.status != "已暂停":
+                    self._set_status_if_not_cancelled(task, "已暂停")
+                return
+
+            files = api_client.list_files(remote_folder_path, start=start, limit=limit)
+
+            # API 调用后立即检查暂停信号
+            if task.stop_event.is_set():
+                logger.info(f"检测到暂停信号，停止扫描文件夹: {remote_folder_path}")
+                if task.status != "已暂停":
+                    self._set_status_if_not_cancelled(task, "已暂停")
+                return
+
+            if not files:
+                break
+
+            for file in files:
+                # 检查是否需要暂停
+                if task.stop_event.is_set():
+                    logger.info(f"检测到暂停信号，停止扫描")
+                    if task.status != "已暂停":
+                        self._set_status_if_not_cancelled(task, "已暂停")
+                    return
+
+                if file.get('isdir'):
+                    # 子文件夹，递归处理
+                    subfolder_name = file.get('server_filename', '')
+                    subfolder_remote_path = file.get('path', '')
+                    subfolder_local_path = os.path.join(local_folder_path, subfolder_name)
+                    subfolder_relative = f"{relative_path}/{subfolder_name}" if relative_path else subfolder_name
+
+                    # 创建本地子文件夹
+                    if not os.path.exists(subfolder_local_path):
+                        os.makedirs(subfolder_local_path)
+
+                    self._scan_and_download_folder(task, api_client, subfolder_remote_path, subfolder_local_path, subfolder_relative)
+                else:
+                    # 文件，记录并立即启动下载
+                    file_size = file.get('size', 0)
+                    file_path = file.get('path', '')
+                    file_name = file.get('server_filename', '')
+
+                    file_info = {
+                        'path': file_path,
+                        'name': file_name,
+                        'size': file_size,
+                        'relative_path': relative_path,
+                        'local_folder': local_folder_path
+                    }
+
+                    task.current_known_size += file_size
+                    task.sub_files.append(file_info)
+
+                    # 检查文件是否已完整下载
+                    local_file_path = os.path.join(local_folder_path, file_name)
+                    skip_download = False
+                    if os.path.exists(local_file_path):
+                        try:
+                            local_size = os.path.getsize(local_file_path)
+                            if local_size >= file_size:
+                                # 文件已完整下载，跳过
+                                with task.progress_lock:
+                                    task.base_completed_size += file_size
+                                    task.completed_size = task.base_completed_size
+                                skip_download = True
+                                logger.info(f"文件已完整下载，跳过: {file_name}")
+                        except Exception as e:
+                            logger.warning(f"检查本地文件失败: {local_file_path}, 错误: {e}")
+
+                    # 如果文件未完整下载，立即启动下载线程
+                    if not skip_download:
+                        download_thread = threading.Thread(
+                            target=self._download_file_in_folder_wrapper,
+                            args=(task, api_client, file_info)
+                        )
+                        download_thread.daemon = True
+                        download_thread.start()
+
+
+            # 如果返回的文件少于 limit，说明已经获取完所有文件
+            if len(files) < limit:
+                break
+
+            start += limit
+            time.sleep(0.05)
+
+        logger.info(f"文件夹扫描完成: {remote_folder_path}")
+
+    def _download_file_in_folder_wrapper(self, folder_task: TransferTask, api_client, file_info: Dict):
+        """包装函数：使用信号量控制并发下载"""
+        # 获取信号量（阻塞直到有可用线程）
+        self.download_semaphore.acquire()
+
+        # 获取信号量后，立即检查是否已暂停
+        if folder_task.stop_event.is_set():
+            # 如果已暂停，释放信号量并返回
+            self.download_semaphore.release()
+            return
+
+        try:
+            logger.info(f"🔓 获得下载线程，开始下载: {file_info.get('name', 'unknown')}")
+            # 执行实际的下载
+            self._download_file_in_folder(folder_task, api_client, file_info)
+        finally:
+            # 释放信号量
+            self.download_semaphore.release()
+            logger.info(f"🔒 释放下载线程: {file_info.get('name', 'unknown')}")
+
+    def _monitor_folder_download(self, task: TransferTask):
+        """监控文件夹下载进度，等待所有文件下载完成"""
+        logger.info(f"开始监控文件夹下载: {task.name}")
+
+        while True:
+            # 检查是否需要暂停或取消
+            if task.stop_event.is_set():
+                # 如果已经被取消，不要覆盖状态
+                if task.status != "已取消":
+                    logger.info(f"文件夹下载被暂停: {task.name}")
+                    self._set_status_if_not_cancelled(task, "已暂停")
+                return
+
+            # 使用锁读取 completed_size
+            with task.progress_lock:
+                # 检查是否所有文件都下载完成
+                if task.completed_size >= task.current_known_size and task.current_known_size > 0:
+                    # 所有文件下载完成
+                    task.progress = 100
+                    task.status = "完成"
+                    task.speed = 0
+                    logger.info(f"✅ 文件夹下载完成: {task.name}, 总大小: {task.current_known_size}")
+                    break
+
+            # 如果文件夹没有被扫描完，继续等待
+            if not task.folder_scan_complete:
+                time.sleep(0.5)
+                continue
+
+            # 每0.5秒检查一次
+            time.sleep(0.5)
+
+    def _download_file_in_folder(self, folder_task: TransferTask, api_client, file_info: Dict):
+        """下载文件夹中的单个文件"""
+        file_name = file_info.get('name', '')
+        file_size = file_info.get('size', 0)
+        file_path = file_info.get('path', '')
+        local_folder = file_info.get('local_folder', '')
+
+        # 构建本地文件路径
+        local_file_path = os.path.join(local_folder, file_name)
+
+        try:
+            # 在开始下载前检查是否已暂停
+            if folder_task.stop_event.is_set():
+                logger.info(f"文件下载被跳过（任务已暂停）: {file_name}")
+                return
+
+            logger.info(f"开始下载文件: {file_name}")
+
+            # 获取 dlink
+            parent_dir = os.path.dirname(file_path)
+            file_list = api_client.list_files(parent_dir if parent_dir else '/')
+
+            fs_id = None
+            for f in file_list:
+                if f.get('path') == file_path or f.get('server_filename') == file_name:
+                    fs_id = str(f.get('fs_id', ''))
+                    break
+
+            if not fs_id:
+                logger.error(f"未找到文件: {file_path}")
+                return
+
+            # 获取下载链接
+            file_info_result = api_client.get_file_info([fs_id])
+            if not file_info_result.get('success'):
+                logger.error(f"获取文件信息失败: {file_name}")
+                return
+
+            dlink = file_info_result.get('data', {}).get('dlink')
+            if not dlink:
+                logger.error(f"未获取到下载链接: {file_name}")
+                return
+
+            # 记录开始时间（用于计算速度）
+            download_start_time = time.time()
+            last_update_time = download_start_time
+            last_downloaded_size = 0
+
+            # 创建进度回调函数
+            def progress_callback(current_file_progress, current_file_downloaded):
+                """实时更新文件夹任务进度"""
+                nonlocal last_update_time, last_downloaded_size
+
+                # 如果文件夹任务已暂停，不再更新进度
+                if folder_task.stop_event.is_set():
+                    return
+
+                current_time = time.time()
+
+                # 使用锁保护并发更新
+                with folder_task.progress_lock:
+                    # 使用 base_completed_size 作为基准，避免多个文件并发时的重复计算
+                    # base_completed_size 包含所有已完整下载的文件大小
+                    # current_file_downloaded 是当前文件已下载的大小
+                    folder_task.completed_size = folder_task.base_completed_size + current_file_downloaded
+
+                    # 更新进度：已完成 / 当前已知总大小
+                    if folder_task.current_known_size > 0:
+                        folder_task.progress = (folder_task.completed_size / folder_task.current_known_size) * 100
+
+                    # 更新速度（每0.5秒更新一次）
+                    if current_time - last_update_time >= 0.5:
+                        time_elapsed = current_time - last_update_time
+                        bytes_downloaded = current_file_downloaded - last_downloaded_size
+
+                        if time_elapsed > 0 and bytes_downloaded > 0:
+                            current_speed = bytes_downloaded / time_elapsed
+                            # 使用加权平均更新速度（新速度占20%，旧速度占80%）
+                            if folder_task.speed > 0:
+                                folder_task.speed = folder_task.speed * 0.8 + current_speed * 0.2
+                            else:
+                                folder_task.speed = current_speed
+
+                        last_update_time = current_time
+                        last_downloaded_size = current_file_downloaded
+
+            # 下载文件（创建一个临时任务用于进度跟踪）
+            temp_task = TransferTask(
+                task_id=0,
+                name=file_name,
+                remote_path=file_path,
+                size=file_size,
+                type='download',
+                local_path=local_file_path
+            )
+
+            # 使用文件夹任务的 stop_event
+            temp_task.stop_event = folder_task.stop_event
+
+            # 下载文件（传递进度回调）
+            download_result = api_client.download_file_with_resume(
+                dlink,
+                local_file_path,
+                temp_task,
+                progress_callback=progress_callback
+            )
+
+            if download_result.get('success'):
+                # 文件下载完成，更新基准完成大小
+                with folder_task.progress_lock:
+                    folder_task.base_completed_size += file_size
+                    folder_task.completed_size = folder_task.base_completed_size
+
+                    # 更新进度：已完成 / 当前已知总大小
+                    if folder_task.current_known_size > 0:
+                        folder_task.progress = (folder_task.completed_size / folder_task.current_known_size) * 100
+
+                logger.info(f"✅ 文件下载完成: {file_name}, 文件夹进度: {folder_task.progress:.1f}% ({folder_task.completed_size}/{folder_task.current_known_size})")
+            else:
+                # 检查是否是暂停
+                is_paused = download_result.get('paused', False)
+                if is_paused or folder_task.stop_event.is_set():
+                    # 暂停时，不再更新 completed_size（已在 pause_task 中统一处理）
+                    # 速度会在 pause_task 中被清零
+                    logger.info(f"⏸ 文件下载已暂停: {file_name}")
+                else:
+                    logger.error(f"❌ 文件下载失败: {file_name}")
+
+        except Exception as e:
+            logger.error(f"下载文件异常: {file_name}, 错误: {e}")
+
     def _is_dlink_valid(self, task: TransferTask) -> bool:
         """检查dlink是否还有效（8小时有效期）"""
         if not task.dlink or not task.dlink_time:
@@ -468,8 +935,10 @@ class TransferManager:
                 # 检查是否是暂停
                 is_paused = download_result.get('paused', False)
                 if is_paused or task.stop_event.is_set():
-                    task.status = "已暂停"
-                    task.error_message = None
+                    # 只有在任务未被取消时才设置为暂停
+                    if task.status != "已取消":
+                        self._set_status_if_not_cancelled(task, "已暂停")
+                        task.error_message = None
                     downloaded_size = download_result.get('downloaded_size', 0)
                     logger.info(f"文件下载已暂停: {task.name}, 已下载: {downloaded_size} bytes")
                 else:
@@ -526,7 +995,7 @@ class TransferManager:
                 error_message = result.get('error', '上传失败')
                 # 检查是否是暂停
                 if "暂停" in error_message:
-                    task.status = "已暂停"
+                    self._set_status_if_not_cancelled(task, "已暂停")
                     task.error_message = None
                     logger.info(f"文件上传已暂停: {task.name}")
                 else:
@@ -621,7 +1090,7 @@ class TransferManager:
                         error_message = result.get('error', '上传失败')
                         # 检查是否是暂停
                         if "暂停" in error_message:
-                            task.status = "已暂停"
+                            self._set_status_if_not_cancelled(task, "已暂停")
                             task.error_message = None
                             logger.info(f"文件上传已暂停: {task.name}")
                         else:
@@ -651,7 +1120,7 @@ class TransferManager:
                     if task.stop_event.is_set() or task.status in ["已取消", "失败", "已暂停"]:
                         logger.info(f"任务 {task.name} 被暂停/取消，停止上传")
                         if task.status not in ["已取消", "失败"]:
-                            task.status = "已暂停"
+                            self._set_status_if_not_cancelled(task, "已暂停")
                         break
 
                     # 如果分片已经上传过，跳过
@@ -669,7 +1138,7 @@ class TransferManager:
                     # 上传分片前再次检查
                     if task.stop_event.is_set():
                         logger.info(f"任务 {task.name} 在上传分片前被暂停")
-                        task.status = "已暂停"
+                        self._set_status_if_not_cancelled(task, "已暂停")
                         break
 
                     # ============ 开始分片内进度估算 ============
@@ -767,7 +1236,8 @@ class TransferManager:
     def _save_resume_data(self, task: TransferTask):
         """保存断点续传数据（一个用户一个文件，包含所有未完成的任务）"""
         # 如果任务已取消或失败，不保存断点数据
-        if task.status in ["已取消", "失败"] or task.stop_event.is_set():
+        # 注意：暂停时也需要保存断点数据，所以不检查 stop_event
+        if task.status in ["已取消", "失败"]:
             logger.info(f"任务已取消/失败，跳过保存断点续传数据: {task.name}")
             return
 
@@ -815,6 +1285,16 @@ class TransferManager:
                 'dlink': task.dlink,
                 'dlink_time': task.dlink_time,
             })
+
+            # 文件夹任务额外数据
+            if task.is_folder:
+                task_data.update({
+                    'is_folder': True,
+                    'sub_files': task.sub_files,
+                    'current_known_size': task.current_known_size,
+                    'completed_size': task.completed_size,
+                    'folder_scan_complete': task.folder_scan_complete,
+                })
 
         all_tasks_data[str(task.task_id)] = task_data
 
@@ -867,15 +1347,41 @@ class TransferManager:
     def pause_task(self, task_id: int):
         """暂停任务"""
         task = self.get_task(task_id)
-        if task and task.status in ["上传中", "下载中", "分片上传中"]:
+        if task and task.status in ["上传中", "下载中", "分片上传中", "扫描中"]:
             task.stop_event.set()  # 设置停止标志
-            task.status = "已暂停"
+            self._set_status_if_not_cancelled(task, "已暂停")
 
             # 重置速度（暂停后速度应该清零，继续时会重新计算）
             task.speed = 0
             if task.type == 'upload':
                 # 上传任务还要重置分片平均速度
                 task.avg_slice_speed = 0
+
+            # 文件夹任务：如果有已扫描的文件，标记为扫描完成
+            if task.is_folder and len(task.sub_files) > 0:
+                task.folder_scan_complete = True
+
+                # 锁定已完成大小，防止下载线程继续更新
+                with task.progress_lock:
+                    # 记录暂停时的已完成大小（基于本地文件实际大小）
+                    actual_completed = 0
+                    for file_info in task.sub_files:
+                        local_file_path = os.path.join(file_info.get('local_folder', ''), file_info.get('name', ''))
+                        file_size = file_info.get('size', 0)
+                        if os.path.exists(local_file_path):
+                            try:
+                                local_size = os.path.getsize(local_file_path)
+                                # 如果本地文件大小 >= 文件大小，说明文件已完整下载
+                                actual_completed += min(local_size, file_size)
+                            except Exception as e:
+                                logger.warning(f"检查本地文件失败: {local_file_path}, 错误: {e}")
+
+                    # 更新已完成大小为实际值
+                    task.completed_size = actual_completed
+                    if task.current_known_size > 0:
+                        task.progress = (actual_completed / task.current_known_size) * 100
+
+                logger.info(f"文件夹任务暂停，标记扫描完成: {task.name}, 已扫描 {len(task.sub_files)} 个文件, 实际完成: {actual_completed}/{task.current_known_size} bytes")
 
             # 保存断点续传数据（如果已登录）
             if self.current_user_uk:
@@ -894,13 +1400,25 @@ class TransferManager:
         """继续任务"""
         task = self.get_task(task_id)
         if task and task.status in ["已暂停", "已暂停（可断点续传）", "等待中"]:
+            # 添加调用栈信息，帮助排查自动恢复问题
+            import traceback
+            logger.info(f"准备继续任务: {task.name}, type={task.type}, is_folder={task.is_folder}")
+            logger.info(f"resume_task 调用栈:\n{''.join(traceback.format_stack())}")
+
             # 创建新的 stop_event，确保是未设置状态
             task.stop_event = Event()
             # 根据任务类型选择恢复方法
             if task.type == 'upload':
                 self.start_upload(task)
             elif task.type == 'download':
-                self.start_download(task)
+                if task.is_folder:
+                    # 文件夹下载任务
+                    logger.info(f"识别为文件夹下载任务，调用 _resume_folder_download")
+                    self._resume_folder_download(task)
+                else:
+                    # 普通文件下载任务
+                    logger.info(f"识别为普通文件下载任务，调用 start_download")
+                    self.start_download(task)
             logger.info(f"任务 {task.name} 已继续")
     
     def cancel_task(self, task_id: int):
@@ -908,12 +1426,25 @@ class TransferManager:
         task = self.get_task(task_id)
         if task:
             # 先停止任务
-            if task.status in ["上传中", "下载中", "分片上传中", "等待中"]:
+            if task.status in ["上传中", "下载中", "分片上传中", "扫描中", "等待中"]:
                 task.stop_event.set()
                 logger.info(f"停止任务: {task.name}")
 
+            # 设置取消状态（会在其他线程中检查，防止被覆盖）
             task.status = "已取消"
+
+            # 清除断点续传数据
             self._clear_resume_data(task_id)
+
+            # 重置速度
+            task.speed = 0
+
+    def _set_status_if_not_cancelled(self, task: TransferTask, status: str):
+        """辅助方法：如果任务未被取消，则设置状态"""
+        if task.status != "已取消":
+            task.status = status
+            return True
+        return False
     
     def resume_incomplete_tasks(self):
         """恢复未完成的任务（在登录成功后调用）"""
@@ -947,6 +1478,12 @@ class TransferManager:
                     task_id = int(task_id_str)
                     task_type = resume_data.get('type', 'upload')
 
+                    # 调试信息
+                    is_folder_flag = resume_data.get('is_folder', False)
+                    has_sub_files = 'sub_files' in resume_data
+                    sub_files_count = len(resume_data.get('sub_files', []))
+                    logger.info(f"恢复任务数据: task_id={task_id}, is_folder={is_folder_flag}, has_sub_files={has_sub_files}, sub_files_count={sub_files_count}")
+
                     # 检查本地文件是否存在
                     local_path = resume_data.get('local_path')
                     if not local_path or not os.path.exists(local_path):
@@ -956,13 +1493,21 @@ class TransferManager:
 
                     # 创建新任务
                     self.task_id_counter = max(self.task_id_counter, task_id)
+
+                    # 判断是否是文件夹任务（兼容旧数据）
+                    is_folder = resume_data.get('is_folder', False)
+                    # 如果没有 is_folder 字段，通过 sub_files 判断
+                    if not is_folder and 'sub_files' in resume_data and len(resume_data.get('sub_files', [])) > 0:
+                        is_folder = True
+
                     task = TransferTask(
                         task_id=task_id,
                         name=resume_data['name'],
                         remote_path=resume_data['remote_path'],
                         size=resume_data['size'],
                         type=task_type,
-                        local_path=local_path
+                        local_path=local_path,
+                        is_folder=is_folder  # 恢复文件夹标志
                     )
 
                     # 恢复任务状态
@@ -996,24 +1541,39 @@ class TransferManager:
                         task.dlink = resume_data.get('dlink')
                         task.dlink_time = resume_data.get('dlink_time')
 
-                        # 检查dlink是否还有效
-                        if task.dlink and task.dlink_time:
-                            elapsed = time.time() - task.dlink_time
-                            remaining = 28800 - elapsed
-                            if remaining > 0:
-                                logger.info(f"恢复的dlink还有效（剩余有效期: {remaining/60:.1f}分钟）")
-                            else:
-                                logger.info(f"恢复的dlink已过期 {elapsed/60:.1f} 分钟，需要重新获取")
+                        # 恢复文件夹任务特有数据
+                        if task.is_folder:  # is_folder 已经在创建 TransferTask 时设置
+                            task.sub_files = resume_data.get('sub_files', [])
+                            task.current_known_size = resume_data.get('current_known_size', 0)
+                            task.completed_size = resume_data.get('completed_size', 0)
+                            task.folder_scan_complete = resume_data.get('folder_scan_complete', False)
+                            task.progress_lock = threading.Lock()
 
-                        # 检查本地文件大小,更新进度
-                        try:
-                            downloaded_size = os.path.getsize(local_path)
-                            total_size = task.size
-                            if total_size > 0:
-                                task.progress = (downloaded_size / total_size) * 100
-                            logger.info(f"恢复下载任务: {task.name}, 进度: {task.progress:.1f}% ({downloaded_size}/{total_size} bytes)")
-                        except Exception as e:
-                            logger.warning(f"无法获取本地文件大小: {e}")
+                            # 根据已完成大小更新进度
+                            if task.current_known_size > 0:
+                                task.progress = (task.completed_size / task.current_known_size) * 100
+
+                            logger.info(f"恢复文件夹下载任务: {task.name}, 进度: {task.progress:.1f}% ({task.completed_size}/{task.current_known_size} bytes), 文件数: {len(task.sub_files)}")
+                        else:
+                            # 普通文件下载任务
+                            # 检查dlink是否还有效
+                            if task.dlink and task.dlink_time:
+                                elapsed = time.time() - task.dlink_time
+                                remaining = 28800 - elapsed
+                                if remaining > 0:
+                                    logger.info(f"恢复的dlink还有效（剩余有效期: {remaining/60:.1f}分钟）")
+                                else:
+                                    logger.info(f"恢复的dlink已过期 {elapsed/60:.1f} 分钟，需要重新获取")
+
+                            # 检查本地文件大小,更新进度
+                            try:
+                                downloaded_size = os.path.getsize(local_path)
+                                total_size = task.size
+                                if total_size > 0:
+                                    task.progress = (downloaded_size / total_size) * 100
+                                logger.info(f"恢复下载任务: {task.name}, 进度: {task.progress:.1f}% ({downloaded_size}/{total_size} bytes)")
+                            except Exception as e:
+                                logger.warning(f"无法获取本地文件大小: {e}")
 
                     # 添加到任务列表
                     self.tasks.append(task)
