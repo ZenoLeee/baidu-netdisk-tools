@@ -100,7 +100,7 @@ class TransferManager:
         self.progress_update_running = True
         self.progress_thread = threading.Thread(target=self._update_slice_progress_loop, daemon=True)
         self.progress_thread.start()
-        
+
     def _ensure_resume_dir(self):
         """确保断点续传数据目录存在"""
         if not os.path.exists(self.resume_data_dir):

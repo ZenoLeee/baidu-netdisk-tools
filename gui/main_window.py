@@ -3,6 +3,8 @@
 """
 import os
 import time
+import threading
+import functools
 from typing import Optional
 
 from PyQt5.QtWidgets import (
@@ -80,6 +82,9 @@ class MainWindow(QMainWindow):
 
         # 当前用户信息
         self.current_account = None
+        # 缓存的用户信息和配额信息（用于登录流程）
+        self._cached_user_info = None
+        self._cached_quota_info = None
 
         # 状态栏组件
         self.status_progress = None
@@ -141,6 +146,19 @@ class MainWindow(QMainWindow):
         # 设置UI
         self.setup_ui()
 
+        # 检查是否有账号，决定默认显示的页面
+        accounts = self.config.get_all_accounts()
+        last_used_account = self.config.load_last_used_account()
+
+        if accounts and last_used_account:
+            # 有账号，先显示文件管理页面（虽然还是空的），避免闪现登录页
+            self.stacked_widget.setCurrentWidget(self.file_manage_page)
+            logger.info(f"有已保存账号，显示文件管理页面")
+        else:
+            # 没有账号，显示登录页面
+            self.stacked_widget.setCurrentWidget(self.login_page)
+            logger.info("没有已保存账号，显示登录页面")
+
         # 移除启动提示（被setup_ui中的页面替代）
         if hasattr(self, 'startup_label') and self.startup_label:
             self.startup_label.deleteLater()
@@ -170,7 +188,8 @@ class MainWindow(QMainWindow):
 
         if last_used_account:
             logger.info(f"尝试自动登录账号: {last_used_account}")
-            self.attempt_auto_login(last_used_account)
+            # 使用 QTimer 延迟调用，让界面先显示
+            QTimer.singleShot(10, lambda: self.attempt_auto_login(last_used_account))
             return
 
         logger.info("没有最近使用的账号，显示登录页面")
@@ -189,7 +208,9 @@ class MainWindow(QMainWindow):
             if self.api_client.is_authenticated():
                 logger.info("认证成功，准备切换到主页面")
                 self.current_account = account_name
-                self.complete_auto_login()
+
+                # 使用 QTimer 延迟调用，让界面先刷新
+                QTimer.singleShot(10, self.complete_auto_login)
 
         except Exception as e:
             logger.warning(f"自动登录过程中出错: {e}")
@@ -198,7 +219,7 @@ class MainWindow(QMainWindow):
     def complete_auto_login(self):
         """完成自动登录后的处理"""
         try:
-            # 同步 token 到 transfer_manager（自动登录时也需要同步）
+            # 同步 token 到 transfer_manager（快速）
             if self.api_client.access_token:
                 self.transfer_manager.api_client.access_token = self.api_client.access_token
                 self.transfer_manager.api_client.current_account = self.api_client.current_account
@@ -210,37 +231,190 @@ class MainWindow(QMainWindow):
             self.user_info_widget.setVisible(True)
 
             # 更新状态栏
-            self.status_label.setText(f"已自动登录: {self.current_account}")
+            self.status_label.setText(f"已自动登录: {self.current_account}，正在加载数据...")
             logger.info("自动登录：已切换到主页面，开始加载数据...")
 
-            # 同步加载用户信息
-            self.update_user_info()
-
-            # 设置用户UK到 transfer_manager
-            try:
-                user_info = self.api_client.get_user_info()
-                if user_info:
-                    uk = user_info.get('uk')
-                    if uk:
-                        self.transfer_manager.set_user_uk(uk)
-                        logger.info(f"自动登录：设置用户UK成功: {uk}")
-                    else:
-                        logger.warning("自动登录：用户信息中未找到UK字段")
-                else:
-                    logger.warning("自动登录：获取用户信息失败")
-            except Exception as e:
-                logger.error(f"自动登录：获取或设置用户UK失败: {e}")
-
-            # 恢复未完成的任务
-            logger.info("自动登录：开始恢复未完成的任务...")
-            self.transfer_manager.resume_incomplete_tasks()
-
-            # 异步加载文件列表（使用现有的线程安全方法）
-            QTimer.singleShot(100, lambda: self.update_items("/"))
+            # 延迟加载，让界面先显示
+            QTimer.singleShot(100, self._start_async_login)
 
         except Exception as e:
             logger.warning(f"完成自动登录时出错: {e}")
+            self.hide_status_progress()
             self.stacked_widget.setCurrentWidget(self.login_page)
+
+    def _start_async_login(self):
+        """开始异步加载数据（使用 threading + QTimer 回调，避免 Worker 崩溃）"""
+        try:
+            self.show_status_progress("正在加载用户信息...")
+
+            # 在后台线程中加载数据
+            def load_in_thread():
+                try:
+                    user_info = self.api_client.get_user_info()
+                    logger.info(f"[ASYNC] 获取到用户信息")
+                    # 使用 functools.partial 确保回调不被垃圾回收
+                    callback = functools.partial(self._process_user_info, user_info)
+                    QTimer.singleShot(0, callback)
+                except Exception as e:
+                    logger.error(f"获取用户信息失败: {e}")
+                    callback = functools.partial(self._process_user_info, None)
+                    QTimer.singleShot(0, callback)
+
+            thread = threading.Thread(target=load_in_thread, daemon=True)
+            thread.start()
+
+        except Exception as e:
+            logger.error(f"启动异步加载失败: {e}")
+            QTimer.singleShot(10, self._load_login_data_sync)
+
+    def _process_user_info(self, user_info):
+        """处理用户信息（在主线程中调用）"""
+        logger.info(f"[ASYNC] 处理用户信息")
+        self._cached_user_info = user_info
+        self.show_status_progress("正在加载配额信息...")
+
+        # 继续在后台线程中加载配额
+        def load_quota_in_thread():
+            try:
+                quota_info = self.api_client.get_quota()
+                logger.info(f"[ASYNC] 获取到配额信息")
+                callback = functools.partial(self._process_quota_info, quota_info)
+                QTimer.singleShot(0, callback)
+            except Exception as e:
+                logger.error(f"获取配额信息失败: {e}")
+                callback = functools.partial(self._process_quota_info, None)
+                QTimer.singleShot(0, callback)
+
+        thread = threading.Thread(target=load_quota_in_thread, daemon=True)
+        thread.start()
+
+    def _process_quota_info(self, quota_info):
+        """处理配额信息（在主线程中调用）"""
+        logger.info(f"[ASYNC] 处理配额信息")
+        self._cached_quota_info = quota_info
+
+        # 更新UI显示
+        user_info = self._cached_user_info
+        if user_info and quota_info:
+            used = quota_info.get('used', 0)
+            total = quota_info.get('total', 0)
+            used_gb = used / (1024 ** 3)
+            total_gb = total / (1024 ** 3)
+
+            baidu_name = user_info.get('baidu_name')
+            uk = user_info.get('uk')
+            info_text = f"用户: {baidu_name} (UK: {uk}) | 已用: {used_gb:.1f}GB / 总共: {total_gb:.1f}GB"
+
+            self.user_info_label.setText(info_text)
+            self.user_info_label_nav.setText(f"{baidu_name}")
+            logger.info(f"用户: {baidu_name} (UK: {uk})")
+
+        self.show_status_progress("正在恢复任务...")
+        QTimer.singleShot(10, self._finish_auto_login)
+
+    def _on_user_info_loaded(self, user_info):
+        """用户信息加载完成"""
+        self._cached_user_info = user_info
+        self.show_status_progress("正在加载配额信息...")
+
+        # 继续加载配额信息
+        worker2 = Worker(func=self.api_client.get_quota)
+        worker2.finished.connect(self._on_quota_loaded)
+        worker2.error.connect(self._on_quota_error)
+        worker2.start()
+
+    def _on_user_info_error(self, error):
+        """用户信息加载错误"""
+        logger.error(f"获取用户信息失败: {error}")
+        self._cached_user_info = None
+        # 继续加载配额
+        worker2 = Worker(func=self.api_client.get_quota)
+        worker2.finished.connect(self._on_quota_loaded)
+        worker2.error.connect(self._on_quota_error)
+        worker2.start()
+
+    def _on_quota_loaded(self, quota_info):
+        """配额信息加载完成"""
+        self._cached_quota_info = quota_info
+
+        # 更新UI显示
+        user_info = self._cached_user_info
+        if user_info and quota_info:
+            used = quota_info.get('used', 0)
+            total = quota_info.get('total', 0)
+            used_gb = used / (1024 ** 3)
+            total_gb = total / (1024 ** 3)
+
+            baidu_name = user_info.get('baidu_name')
+            uk = user_info.get('uk')
+            info_text = f"用户: {baidu_name} (UK: {uk}) | 已用: {used_gb:.1f}GB / 总共: {total_gb:.1f}GB"
+
+            self.user_info_label.setText(info_text)
+            self.user_info_label_nav.setText(f"{baidu_name}")
+            logger.info(f"用户: {baidu_name} (UK: {uk})")
+
+        self.show_status_progress("正在恢复任务...")
+        # 设置UK并恢复任务
+        QTimer.singleShot(10, self._finish_auto_login)
+
+    def _on_quota_error(self, error):
+        """配额信息加载错误"""
+        logger.error(f"获取配额信息失败: {error}")
+        self._cached_quota_info = None
+        # 继续完成流程
+        QTimer.singleShot(10, self._finish_auto_login)
+
+    def _load_login_data_sync(self):
+        """同步加载登录数据（备用方案）"""
+        try:
+            self.show_status_progress("正在加载用户信息...")
+            user_info = self.api_client.get_user_info()
+            self._cached_user_info = user_info
+
+            self.show_status_progress("正在加载配额信息...")
+            quota_info = self.api_client.get_quota()
+            self._cached_quota_info = quota_info
+
+            # 更新UI显示
+            if user_info and quota_info:
+                used = quota_info.get('used', 0)
+                total = quota_info.get('total', 0)
+                used_gb = used / (1024 ** 3)
+                total_gb = total / (1024 ** 3)
+
+                baidu_name = user_info.get('baidu_name')
+                uk = user_info.get('uk')
+                info_text = f"用户: {baidu_name} (UK: {uk}) | 已用: {used_gb:.1f}GB / 总共: {total_gb:.1f}GB"
+
+                self.user_info_label.setText(info_text)
+                self.user_info_label_nav.setText(f"{baidu_name}")
+                logger.info(f"用户: {baidu_name} (UK: {uk})")
+
+            self.show_status_progress("正在恢复任务...")
+        except Exception as e:
+            logger.error(f"加载登录数据时出错: {e}")
+
+        # 设置UK并恢复任务
+        QTimer.singleShot(10, self._finish_auto_login)
+
+    def _finish_auto_login(self):
+        """完成自动登录"""
+        try:
+            # 设置UK
+            if self._cached_user_info:
+                uk = self._cached_user_info.get('uk')
+                if uk:
+                    self.transfer_manager.set_user_uk(uk)
+                    logger.info(f"自动登录：设置用户UK成功: {uk}")
+
+            # 恢复未完成的任务
+            self.transfer_manager.resume_incomplete_tasks()
+        except Exception as e:
+            logger.error(f"完成自动登录时出错: {e}")
+
+        # 隐藏进度条并加载文件列表
+        self.hide_status_progress()
+        QTimer.singleShot(10, lambda: self.update_items("/"))
 
     def setup_ui(self):
         """设置UI"""
@@ -2806,42 +2980,191 @@ class MainWindow(QMainWindow):
 
         self.current_account = result['account_name']
 
-        logger.info("📦 初始化 API 客户端...")
-        self.initialize_api_client()
-
-        # 先切换到文件管理页面（快速显示界面）
+        # 先切换到文件管理页面
         self.switch_to_file_manage_page()
         self.tab_container.setVisible(True)
         self.user_info_widget.setVisible(True)
 
         # 更新状态栏
-        self.status_label.setText(f"已登录: {self.current_account}")
+        self.status_label.setText(f"已登录: {self.current_account}，正在加载数据...")
         logger.info("已切换到主页面，开始加载数据...")
 
-        # 同步加载用户信息（通常很快）
-        self.update_user_info()
+        # 显示进度条
+        self.show_status_progress("正在初始化...")
 
-        # 设置用户UK到 transfer_manager
+        # 初始化 API 客户端（快速）
+        self.initialize_api_client()
+
+        # 延迟加载，让界面先显示
+        QTimer.singleShot(100, self._start_manual_async_login)
+
+    def _start_manual_async_login(self):
+        """开始手动登录异步加载数据"""
+        self.show_status_progress("正在加载用户信息...")
+
+        # 在后台线程中加载数据
+        def load_in_thread():
+            try:
+                user_info = self.api_client.get_user_info()
+                logger.info(f"[ASYNC] 获取到用户信息")
+                callback = functools.partial(self._manual_process_user_info, user_info)
+                QTimer.singleShot(0, callback)
+            except Exception as e:
+                logger.error(f"后台线程出错: {e}")
+                callback = functools.partial(self._manual_process_user_info, None)
+                QTimer.singleShot(0, callback)
+
+        thread = threading.Thread(target=load_in_thread, daemon=True)
+        thread.start()
+
+    def _manual_process_user_info(self, user_info):
+        """处理用户信息（手动登录）"""
+        logger.info(f"[ASYNC] 处理用户信息")
+        self._cached_user_info = user_info
+        self.show_status_progress("正在加载配额信息...")
+
+        # 继续在后台线程中加载配额
+        def load_quota_in_thread():
+            try:
+                quota_info = self.api_client.get_quota()
+                logger.info(f"[ASYNC] 获取到配额信息")
+                callback = functools.partial(self._manual_process_quota_info, quota_info)
+                QTimer.singleShot(0, callback)
+            except Exception as e:
+                logger.error(f"后台线程出错: {e}")
+                callback = functools.partial(self._manual_process_quota_info, None)
+                QTimer.singleShot(0, callback)
+
+        thread = threading.Thread(target=load_quota_in_thread, daemon=True)
+        thread.start()
+
+    def _manual_process_quota_info(self, quota_info):
+        """处理配额信息（手动登录）"""
+        logger.info(f"[ASYNC] 处理配额信息")
+        self._cached_quota_info = quota_info
+
+        # 更新UI显示
+        user_info = self._cached_user_info
+        if user_info and quota_info:
+            used = quota_info.get('used', 0)
+            total = quota_info.get('total', 0)
+            used_gb = used / (1024 ** 3)
+            total_gb = total / (1024 ** 3)
+
+            baidu_name = user_info.get('baidu_name')
+            uk = user_info.get('uk')
+            info_text = f"用户: {baidu_name} (UK: {uk}) | 已用: {used_gb:.1f}GB / 总共: {total_gb:.1f}GB"
+
+            self.user_info_label.setText(info_text)
+            self.user_info_label_nav.setText(f"{baidu_name}")
+            logger.info(f"用户: {baidu_name} (UK: {uk})")
+
+        self.show_status_progress("正在恢复任务...")
+        QTimer.singleShot(10, self._finish_login)
+
+    def _on_manual_user_info_loaded(self, user_info):
+        """手动登录 - 用户信息加载完成"""
+        self._cached_user_info = user_info
+        self.show_status_progress("正在加载配额信息...")
+
+        # 继续加载配额信息
+        worker2 = Worker(func=self.api_client.get_quota)
+        worker2.finished.connect(self._on_manual_quota_loaded)
+        worker2.error.connect(self._on_manual_quota_error)
+        worker2.start()
+
+    def _on_manual_user_info_error(self, error):
+        """手动登录 - 用户信息加载错误"""
+        logger.error(f"获取用户信息失败: {error}")
+        self._cached_user_info = None
+        # 继续加载配额
+        worker2 = Worker(func=self.api_client.get_quota)
+        worker2.finished.connect(self._on_manual_quota_loaded)
+        worker2.error.connect(self._on_manual_quota_error)
+        worker2.start()
+
+    def _on_manual_quota_loaded(self, quota_info):
+        """手动登录 - 配额信息加载完成"""
+        self._cached_quota_info = quota_info
+
+        # 更新UI显示
+        user_info = self._cached_user_info
+        if user_info and quota_info:
+            used = quota_info.get('used', 0)
+            total = quota_info.get('total', 0)
+            used_gb = used / (1024 ** 3)
+            total_gb = total / (1024 ** 3)
+
+            baidu_name = user_info.get('baidu_name')
+            uk = user_info.get('uk')
+            info_text = f"用户: {baidu_name} (UK: {uk}) | 已用: {used_gb:.1f}GB / 总共: {total_gb:.1f}GB"
+
+            self.user_info_label.setText(info_text)
+            self.user_info_label_nav.setText(f"{baidu_name}")
+            logger.info(f"用户: {baidu_name} (UK: {uk})")
+
+        self.show_status_progress("正在恢复任务...")
+        # 完成登录
+        QTimer.singleShot(10, self._finish_login)
+
+    def _on_manual_quota_error(self, error):
+        """手动登录 - 配额信息加载错误"""
+        logger.error(f"获取配额信息失败: {error}")
+        self._cached_quota_info = None
+        # 继续完成流程
+        QTimer.singleShot(10, self._finish_login)
+
+    def _load_manual_login_data_sync(self):
+        """同步加载手动登录数据（备用方案）"""
         try:
+            self.show_status_progress("正在加载用户信息...")
             user_info = self.api_client.get_user_info()
-            if user_info:
+            self._cached_user_info = user_info
+
+            self.show_status_progress("正在加载配额信息...")
+            quota_info = self.api_client.get_quota()
+            self._cached_quota_info = quota_info
+
+            # 更新UI显示
+            if user_info and quota_info:
+                used = quota_info.get('used', 0)
+                total = quota_info.get('total', 0)
+                used_gb = used / (1024 ** 3)
+                total_gb = total / (1024 ** 3)
+
+                baidu_name = user_info.get('baidu_name')
                 uk = user_info.get('uk')
+                info_text = f"用户: {baidu_name} (UK: {uk}) | 已用: {used_gb:.1f}GB / 总共: {total_gb:.1f}GB"
+
+                self.user_info_label.setText(info_text)
+                self.user_info_label_nav.setText(f"{baidu_name}")
+                logger.info(f"用户: {baidu_name} (UK: {uk})")
+
+            self.show_status_progress("正在恢复任务...")
+        except Exception as e:
+            logger.error(f"加载登录数据时出错: {e}")
+
+        # 完成登录
+        QTimer.singleShot(10, self._finish_login)
+
+    def _finish_login(self):
+        """完成登录"""
+        try:
+            # 设置UK
+            if self._cached_user_info:
+                uk = self._cached_user_info.get('uk')
                 if uk:
                     self.transfer_manager.set_user_uk(uk)
                     logger.info(f"设置用户UK成功: {uk}")
-                else:
-                    logger.warning("用户信息中未找到UK字段")
-            else:
-                logger.warning("获取用户信息失败")
+
+            # 恢复未完成的任务
+            self.transfer_manager.resume_incomplete_tasks()
         except Exception as e:
-            logger.error(f"获取或设置用户UK失败: {e}")
+            logger.error(f"完成登录时出错: {e}")
 
-        # 恢复未完成的任务
-        logger.info("恢复未完成的任务...")
-        self.transfer_manager.resume_incomplete_tasks()
-
-        # 异步加载文件列表（使用现有的线程安全方法）
-        QTimer.singleShot(100, lambda: self.update_items("/"))
+        # 隐藏进度条并加载文件列表
+        self.hide_status_progress()
+        QTimer.singleShot(10, lambda: self.update_items("/"))
 
     def initialize_api_client(self):
         self.api_client = BaiduPanAPI()
