@@ -368,6 +368,45 @@ class BaiduPanAPI:
                 logger.error("获取文件列表失败: 请求返回空")
             return []
 
+    def search_files(self, keyword: str, path: str = '/', category: int = None, page: int = 1, recursion: int = 1) -> Optional[Dict[str, Any]]:
+        """
+        搜索文件
+
+        Args:
+            keyword: 搜索关键字，最大30字符
+            path: 搜索目录，默认根目录
+            category: 文件类型，1视频、2音频、3图片、4文档、5应用、6其他、7种子
+            page: 页数，从1开始
+            recursion: 是否递归搜索，默认1
+
+        Returns:
+            搜索结果，包含 list 和 has_more
+        """
+        params = {
+            'method': 'search',
+            'key': keyword[:30],  # 限制最大30字符
+            'dir': path,
+            'recursion': recursion,
+            'page': page,
+            'num': 500,  # 默认500，不能修改
+            '_': int(time.time() * 1000)  # 添加时间戳避免缓存
+        }
+
+        if category is not None:
+            params['category'] = category
+
+        result = self._make_request('GET', '/rest/2.0/xpan/file', params=params)
+
+        # 如果返回的是列表（旧的API格式），转换为标准格式
+        if isinstance(result, list):
+            return {
+                'errno': 0,
+                'list': result,
+                'has_more': 0
+            }
+
+        return result
+
     def get_folders(self, path: str = '/') -> List[Dict[str, Any]]:
         """
         获取指定路径下的所有文件夹
@@ -479,35 +518,6 @@ class BaiduPanAPI:
             else:
                 logger.error("创建文件夹失败: 请求返回空")
             return False
-
-    def search_files(self, keyword: str, path: str = '/', recursion: int = FileConstants.RECURSION_SEARCH_ENABLED, start: int = 0, limit: int = FileConstants.DEFAULT_PAGE_SIZE) -> List[Dict[str, Any]]:
-        """
-        搜索文件
-
-        Args:
-            keyword: 搜索关键词
-            path: 搜索路径
-            recursion: 是否递归搜索
-            start: 起始位置
-            limit: 每页数量
-        """
-        params = {
-            'method': 'search',
-            'key': keyword,
-            'dir': path,
-            'recursion': recursion,
-            'start': start,
-            'limit': limit,
-            'web': 1
-        }
-
-        result = self._make_request('GET', '/rest/2.0/xpan/file', params=params)
-
-        if result and result.get('errno') == 0:
-            return result.get('list', [])
-        else:
-            logger.error(f"搜索文件失败: {result}")
-            return []
 
     # ========== 文件上传相关方法 ==========
 

@@ -21,6 +21,22 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import QIcon, QKeySequence, QColor, QBrush
 
 from gui.login_dialog import LoginDialog
+
+
+class ClickableLabel(QLabel):
+    """可点击的 QLabel"""
+    def __init__(self, text, callback=None):
+        super().__init__(text)
+        self.callback = callback
+        if callback:
+            self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if self.callback and event.button() == Qt.LeftButton:
+            self.callback()
+        super().mousePressEvent(event)
+
+
 from gui.share_dialog import ShareDialog
 from core.api_client import BaiduPanAPI
 from gui.style import AppStyles
@@ -66,6 +82,11 @@ class MainWindow(QMainWindow):
         # 读取下载线程数配置
         max_threads = self.config.get_max_download_threads()
         self.transfer_manager.update_download_thread_limit(max_threads)
+
+        # 文件列表排序状态
+        self.sort_column = 0  # 0:文件名, 1:大小, 2:修改时间
+        self.sort_order = 'asc'  # 'asc':升序, 'desc':降序
+        self.current_file_list = []  # 保存当前加载的文件列表
 
         # 版本管理器
         self.version_manager = VersionManager()
@@ -545,6 +566,7 @@ class MainWindow(QMainWindow):
         # 左侧用户信息标签
         self.user_info_label = QLabel()
         self.user_info_label.setObjectName("user")
+        self.user_info_label.setMinimumWidth(440)
         user_info_container_layout.addWidget(self.user_info_label)
 
         # 右侧按钮区域
@@ -585,6 +607,76 @@ class MainWindow(QMainWindow):
         self.refresh_btn.clicked.connect(lambda: self.update_items(self.current_path))
         button_layout.addWidget(self.refresh_btn)
 
+        # 搜索框容器（用于垂直布局搜索框和提示）
+        search_container = QWidget()
+        search_layout = QVBoxLayout(search_container)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.setSpacing(2)
+
+        # 搜索框
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 搜索文件...")
+        self.search_input.setMaximumWidth(200)
+        self.search_input.setMinimumWidth(150)
+        self.search_input.setStyleSheet("""
+            QLineEdit {
+                padding: 5px 10px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                background: white;
+            }
+            QLineEdit:focus {
+                border: 1px solid #4A90E2;
+            }
+        """)
+        self.search_input.returnPressed.connect(self.on_search)
+        # 监听文本变化，实时检查长度
+        self.search_input.textChanged.connect(self._on_search_input_changed)
+        search_layout.addWidget(self.search_input)
+
+        # 搜索提示标签
+        self.search_hint_label = QLabel()
+        self.search_hint_label.setStyleSheet("color: #e74c3c; font-size: 11px;")
+        self.search_hint_label.setMaximumWidth(200)
+        self.search_hint_label.hide()  # 默认隐藏
+        search_layout.addWidget(self.search_hint_label)
+
+        # 文件类型下拉框
+        self.search_category_combo = QComboBox()
+        self.search_category_combo.setStyleSheet("""
+            QComboBox {
+                padding: 5px 10px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                background: white;
+                min-width: 80px;
+            }
+            QComboBox:focus {
+                border: 1px solid #4A90E2;
+            }
+        """)
+        self.search_category_combo.setMaxVisibleItems(10)
+        self.search_category_combo.setToolTip("筛选文件类型")
+        # 添加选项：(显示文本, category值)
+        self.search_category_combo.addItem("全部", None)
+        self.search_category_combo.addItem("🎬 视频", 1)
+        self.search_category_combo.addItem("🎵 音频", 2)
+        self.search_category_combo.addItem("🖼️ 图片", 3)
+        self.search_category_combo.addItem("📄 文档", 4)
+        self.search_category_combo.addItem("📱 应用", 5)
+        self.search_category_combo.addItem("📁 其他", 6)
+        self.search_category_combo.addItem("🌱 种子", 7)
+
+        # 搜索按钮
+        self.search_btn = QPushButton("搜索")
+        self.search_btn.setObjectName("primary")
+        self.search_btn.setMaximumWidth(60)
+        self.search_btn.setMinimumWidth(50)
+        self.search_btn.clicked.connect(self.on_search)
+        button_layout.addWidget(search_container)
+        button_layout.addWidget(self.search_category_combo)
+        button_layout.addWidget(self.search_btn)
+
         # 添加到按钮区域
         user_info_container_layout.addWidget(button_widget)
 
@@ -593,9 +685,11 @@ class MainWindow(QMainWindow):
 
         # 添加面包屑导航容器
         self.breadcrumb_widget = QWidget()
+        self.breadcrumb_widget.setFixedHeight(35)  # 设置固定高度
+        self.breadcrumb_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.breadcrumb_layout = QHBoxLayout(self.breadcrumb_widget)
-        self.breadcrumb_layout.setContentsMargins(1, 1, 1, 1)
-        self.breadcrumb_layout.setSpacing(1)
+        self.breadcrumb_layout.setContentsMargins(5, 5, 5, 5)
+        self.breadcrumb_layout.setSpacing(5)
         # 初始面包屑（显示根目录）
         self.update_breadcrumb("/")
         user_layout.addWidget(self.breadcrumb_widget)
@@ -623,6 +717,12 @@ class MainWindow(QMainWindow):
         header.resizeSection(2, 180)
         header.setSectionResizeMode(0, QHeaderView.Interactive)
         self.file_table.setColumnWidth(0, 450)
+
+        # 连接表头点击事件用于排序
+        header.sectionClicked.connect(self.on_header_clicked)
+
+        # 初始化表头显示
+        self.update_header_labels()
 
         # 设置右键菜单
         self.file_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -2024,6 +2124,16 @@ class MainWindow(QMainWindow):
             location_label.setObjectName('locationLabel')
             self.breadcrumb_layout.addWidget(location_label)
 
+            # 添加小房子图标（点击返回根目录）
+            if path == "/":
+                home_label = QLabel("🏠")
+                home_label.setObjectName("breadcrumbHome")
+                home_label.setEnabled(False)
+            else:
+                home_label = ClickableLabel("🏠", lambda: self.update_items("/"))
+                home_label.setObjectName("breadcrumbHome")
+            self.breadcrumb_layout.addWidget(home_label)
+
             # 处理路径
             parts = path.strip('/').split('/')
 
@@ -2071,6 +2181,62 @@ class MainWindow(QMainWindow):
             self.breadcrumb_layout.addWidget(error_label)
             self.breadcrumb_layout.addStretch()
 
+    def update_search_breadcrumb(self, keyword: str, result_count: str = ""):
+        """更新搜索面包屑导航"""
+        try:
+            logger.info(f"[搜索面包屑] 更新搜索面包屑: keyword={keyword}, count={result_count}")
+
+            # 清除现有组件（不使用deleteLater，直接移除）
+            while self.breadcrumb_layout.count():
+                item = self.breadcrumb_layout.takeAt(0)
+                if item:
+                    widget = item.widget()
+                    if widget:
+                        widget.setParent(None)
+
+            # 直接添加新组件
+            # 位置: 标签
+            location_label = QLabel("位置:")
+            location_label.setObjectName('locationLabel')
+            self.breadcrumb_layout.addWidget(location_label)
+
+            # 添加小房子图标（可点击返回根目录）
+            home_label = ClickableLabel("🏠", lambda: self.update_items("/"))
+            home_label.setObjectName("breadcrumbHome")
+            self.breadcrumb_layout.addWidget(home_label)
+
+            # 添加根目录按钮（可点击返回根目录）
+            root_btn = QPushButton("根目录")
+            root_btn.setFlat(True)
+            root_btn.setCursor(Qt.PointingHandCursor)
+            root_btn.setObjectName("breadcrumbRoot")
+            root_btn.clicked.connect(lambda: self.update_items("/"))
+            self.breadcrumb_layout.addWidget(root_btn)
+
+            # 添加分隔符
+            separator = QLabel(">")
+            separator.setObjectName("breadcrumbSeparator")
+            self.breadcrumb_layout.addWidget(separator)
+
+            # 添加搜索关键词标签
+            search_label = QLabel(f"{keyword}(搜索){result_count}")
+            search_label.setObjectName("breadcrumbCurrent")
+            self.breadcrumb_layout.addWidget(search_label)
+
+            self.breadcrumb_layout.addStretch()
+
+            # 强制更新UI
+            self.breadcrumb_widget.update()
+            self.breadcrumb_layout.update()
+            self.breadcrumb_widget.show()
+
+            logger.info(f"[搜索面包屑] 面包屑更新完成，组件数量: {self.breadcrumb_layout.count()}")
+
+        except Exception as e:
+            logger.error(f"更新搜索面包屑时出错: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
     def update_items(self, path):
         """更新items"""
         if not self.api_client:
@@ -2098,6 +2264,265 @@ class MainWindow(QMainWindow):
         self.current_worker.finished.connect(self.on_directory_success)
         self.current_worker.error.connect(self.on_directory_load_error)
         self.current_worker.start()
+
+    def on_header_clicked(self, column_index):
+        """表头点击事件处理 - 本地排序"""
+        # 如果点击的是同一列，切换排序方向
+        if self.sort_column == column_index:
+            self.sort_order = 'desc' if self.sort_order == 'asc' else 'asc'
+        else:
+            # 点击不同的列，重置为升序
+            self.sort_column = column_index
+            self.sort_order = 'asc'
+
+        # 更新表头显示
+        self.update_header_labels()
+
+        # 本地对已加载的数据进行排序
+        self.sort_and_display_files()
+
+    def sort_and_display_files(self):
+        """对当前文件列表进行排序并重新显示"""
+        if not self.current_file_list:
+            return
+
+        # 根据列索引获取排序键函数
+        def get_sort_key(item):
+            if self.sort_column == 0:  # 文件名
+                # 文件夹排在前面，然后按名称排序
+                is_dir = item.get('isdir', 0)
+                name = item.get('server_filename', '')
+                return (0 if is_dir else 1, name.lower())
+            elif self.sort_column == 1:  # 大小
+                is_dir = item.get('isdir', 0)
+                size = item.get('size', 0)
+                # 文件夹排在前面，然后按大小排序
+                return (0 if is_dir else 1, size)
+            else:  # 修改时间 (column == 2)
+                is_dir = item.get('isdir', 0)
+                mtime = item.get('mtime', 0)
+                # 文件夹排在前面，然后按时间排序
+                return (0 if is_dir else 1, mtime)
+
+        # 进行排序
+        reverse = (self.sort_order == 'desc')
+        sorted_list = sorted(self.current_file_list, key=get_sort_key, reverse=reverse)
+
+        # 重新显示
+        self.file_table.setRowCount(0)
+        self.set_list_items(sorted_list)
+
+    def update_header_labels(self):
+        """更新表头标签，显示排序指示器"""
+        headers = ['文件名', '大小', '修改时间']
+        sort_symbols = {'asc': ' ▲', 'desc': ' ▼'}
+
+        for i in range(3):
+            label = headers[i]
+            if i == self.sort_column:
+                label += sort_symbols[self.sort_order]
+            self.file_table.horizontalHeaderItem(i).setText(label)
+
+    def show_search_error(self, message: str, duration: int = 3000):
+        """显示搜索错误提示（泡泡提醒）"""
+        # 在搜索提示标签显示错误
+        self.search_hint_label.setText(f"❌ {message}")
+        self.search_hint_label.setStyleSheet("color: #e74c3c; font-size: 11px; background: #fadbd8; padding: 3px 8px; border-radius: 3px;")
+        self.search_hint_label.show()
+
+        # duration 毫秒后自动隐藏
+        QTimer.singleShot(duration, lambda: self.search_hint_label.hide())
+
+    def _on_search_input_changed(self, text: str):
+        """搜索框文本变化时的处理"""
+        char_count = len(text)
+        if char_count > 30:
+            # 显示红色边框
+            self.search_input.setStyleSheet("""
+                QLineEdit {
+                    padding: 5px 10px;
+                    border: 1px solid #e74c3c;
+                    border-radius: 4px;
+                    background: white;
+                }
+                QLineEdit:focus {
+                    border: 1px solid #e74c3c;
+                }
+            """)
+            # 显示提示文字
+            self.search_hint_label.setText(f"⚠️ 已超限 {char_count}/30 字符")
+            self.search_hint_label.show()
+        else:
+            # 恢复正常样式
+            self.search_input.setStyleSheet("""
+                QLineEdit {
+                    padding: 5px 10px;
+                    border: 1px solid #ccc;
+                    border-radius: 4px;
+                    background: white;
+                }
+                QLineEdit:focus {
+                    border: 1px solid #4A90E2;
+                }
+            """)
+            # 隐藏提示文字
+            self.search_hint_label.hide()
+
+    def on_search(self):
+        """执行搜索"""
+        keyword = self.search_input.text().strip()
+        if not keyword:
+            QMessageBox.warning(self, "提示", "请输入搜索关键字")
+            return
+
+        # 获取选择的文件类型
+        category = self.search_category_combo.currentData()
+
+        self._perform_search(keyword, category=category)
+
+    def _perform_search(self, keyword: str, category: int = None, page: int = 1):
+        """执行搜索（支持分页）"""
+        if not self.api_client:
+            return
+
+        logger.info(f"[搜索] 开始搜索: keyword={keyword}, category={category}, page={page}, path={self.current_path}")
+
+        # 如果有正在运行的Worker，先停止
+        if self.current_worker and self.current_worker.isRunning():
+            self.current_worker.stop()
+            self.current_worker.wait()
+
+        # 显示进度
+        self.is_loading_files = True
+        self.file_table.setEnabled(False)
+        self.show_status_progress(f"正在搜索: {keyword}")
+
+        # 使用 threading + QTimer 避免跨线程问题
+        def on_search_complete(result):
+            logger.info(f"[搜索] 回调被调用，result类型: {type(result)}")
+            try:
+                self.is_loading_files = False
+                self.hide_status_progress()
+
+                if result and result.get('errno') == 0:
+                    file_list = result.get('list', [])
+                    self.current_file_list = file_list  # 保存搜索结果
+                    logger.info(f"[搜索] 搜索成功，找到 {len(file_list)} 个结果")
+
+                    self.file_table.setRowCount(0)
+                    self.set_list_items(file_list)
+                    self.file_table.setEnabled(True)
+
+                    # 更新面包屑，显示搜索状态
+                    if file_list:
+                        has_more = result.get('has_more', 0)
+                        if has_more:
+                            result_count = f" (显示前{len(file_list)}个，还有更多)"
+                        else:
+                            result_count = f" (共{len(file_list)}个)"
+                    else:
+                        result_count = " (无结果)"
+
+                    logger.info(f"[搜索] 准备更新面包屑: keyword={keyword}, count={result_count}")
+                    self.update_search_breadcrumb(keyword, result_count)
+                    logger.info(f"[搜索] 面包屑更新完成")
+                    self.status_label.setText(f"搜索完成，找到 {len(file_list)} 个结果")
+
+                    # 更新表头显示（添加排序支持）
+                    self.update_header_labels()
+                else:
+                    error_msg = result.get('errmsg', '未知错误') if result else '搜索失败'
+                    logger.error(f"[搜索] 搜索失败: {error_msg}")
+                    QMessageBox.warning(self, "搜索失败", f"搜索失败：{error_msg}")
+                    self.file_table.setEnabled(True)
+
+                self.current_worker = None
+                self._set_transfer_buttons_enabled(True)
+            except Exception as e:
+                logger.error(f"[搜索] 回调处理异常: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                self.is_loading_files = False
+                self.hide_status_progress()
+                self.file_table.setEnabled(True)
+
+        # 在后台线程中执行搜索
+        def search_in_thread():
+            try:
+                logger.info(f"[搜索] 线程开始执行 API 调用")
+                result = self.api_client.search_files(
+                    keyword=keyword,
+                    path=self.current_path,
+                    category=category,
+                    page=page,
+                    recursion=1
+                )
+                logger.info(f"[搜索] API 调用完成，result类型: {type(result)}")
+                # 使用 QTimer 确保回调在主线程中执行
+                callback = functools.partial(on_search_complete, result)
+                QTimer.singleShot(0, callback)
+            except Exception as e:
+                logger.error(f"[搜索] 搜索异常: {e}")
+                error_result = {'errno': -1, 'errmsg': str(e)}
+                callback = functools.partial(on_search_complete, error_result)
+                QTimer.singleShot(0, callback)
+            logger.info(f"[搜索] 回调被调用，result类型: {type(result)}")
+            self.is_loading_files = False
+            self.hide_status_progress()
+
+            # 处理错误情况：result 可能是字符串（错误消息）
+            if isinstance(result, str):
+                error_msg = result
+                logger.error(f"[搜索] 搜索失败: {error_msg}")
+                self.show_search_error(f"搜索失败：{error_msg}")
+                self.file_table.setEnabled(True)
+            elif result and result.get('errno') == 0:
+                all_files = result.get('list', [])
+
+                # 客户端过滤：如果选择了特定category，过滤结果
+                if category is not None:
+                    original_count = len(all_files)
+                    file_list = [f for f in all_files if f.get('category') == category]
+                    logger.info(f"[搜索] 客户端过滤: 原始{original_count}个 -> 过滤后{len(file_list)}个 (category={category})")
+                else:
+                    file_list = all_files
+
+                self.current_file_list = file_list  # 保存搜索结果
+                logger.info(f"[搜索] 搜索成功，找到 {len(file_list)} 个结果")
+
+                self.file_table.setRowCount(0)
+                self.set_list_items(file_list)
+                self.file_table.setEnabled(True)
+
+                # 更新面包屑，显示搜索状态
+                if file_list:
+                    has_more = result.get('has_more', 0)
+                    if has_more:
+                        result_count = f" (显示前{len(file_list)}个，还有更多)"
+                    else:
+                        result_count = f" (共{len(file_list)}个)"
+                else:
+                    result_count = " (无结果)"
+
+                # 使用 QTimer.singleShot 确保面包屑更新在主线程正确执行
+                QTimer.singleShot(0, functools.partial(self.update_search_breadcrumb, keyword, result_count))
+                self.status_label.setText(f"搜索完成，找到 {len(file_list)} 个结果")
+
+                # 更新表头显示（添加排序支持）
+                self.update_header_labels()
+            else:
+                error_msg = result.get('errmsg', '未知错误') if result else '搜索失败'
+                logger.error(f"[搜索] 搜索失败: {error_msg}")
+                self.show_search_error(f"搜索失败：{error_msg}")
+                self.file_table.setEnabled(True)
+
+            self.current_worker = None
+            self._set_transfer_buttons_enabled(True)
+
+        # 启动搜索线程
+        logger.info(f"[搜索] 启动搜索线程")
+        thread = threading.Thread(target=search_in_thread, daemon=True)
+        thread.start()
 
     def show_file_table_menu(self, position):
         """显示文件表格的右键菜单"""
@@ -2934,6 +3359,10 @@ class MainWindow(QMainWindow):
         """目录加载成功回调"""
         self.is_loading_files = False  # 清除加载标志
         self.hide_status_progress()
+
+        # 保存文件列表数据用于本地排序
+        self.current_file_list = result
+
         self.file_table.setRowCount(0)
         self.set_list_items(result)
         self.file_table.setEnabled(True)
