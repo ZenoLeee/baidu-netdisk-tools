@@ -66,7 +66,6 @@ class MainWindow(QMainWindow):
         # 读取下载线程数配置
         max_threads = self.config.get_max_download_threads()
         self.transfer_manager.update_download_thread_limit(max_threads)
-        logger.info(f"初始化下载线程数限制: {max_threads}")
 
         # 版本管理器
         self.version_manager = VersionManager()
@@ -131,7 +130,6 @@ class MainWindow(QMainWindow):
         # 如果有账号，显示"正在登录"
         if accounts:
             self.startup_label.setText("正在登录...")
-            logger.info(f"找到 {len(accounts)} 个已保存账号，准备自动登录")
         else:
             self.startup_label.setText("准备就绪")
 
@@ -153,7 +151,6 @@ class MainWindow(QMainWindow):
         if accounts and last_used_account:
             # 有账号，先显示文件管理页面（虽然还是空的），避免闪现登录页
             self.stacked_widget.setCurrentWidget(self.file_manage_page)
-            logger.info(f"有已保存账号，显示文件管理页面")
         else:
             # 没有账号，显示登录页面
             self.stacked_widget.setCurrentWidget(self.login_page)
@@ -184,15 +181,13 @@ class MainWindow(QMainWindow):
 
         # 尝试获取最近使用的账号
         last_used_account = self.config.load_last_used_account()
-        logger.info(f"最近使用的账号: {last_used_account}")
 
         if last_used_account:
-            logger.info(f"尝试自动登录账号: {last_used_account}")
             # 使用 QTimer 延迟调用，让界面先显示
             QTimer.singleShot(10, lambda: self.attempt_auto_login(last_used_account))
             return
 
-        logger.info("没有最近使用的账号，显示登录页面")
+        # 没有最近使用的账号，显示登录页面
         self.stacked_widget.setCurrentWidget(self.login_page)
 
     def attempt_auto_login(self, account_name):
@@ -206,7 +201,6 @@ class MainWindow(QMainWindow):
 
             # 检查认证状态（如果需要自动刷新token）
             if self.api_client.is_authenticated():
-                logger.info("认证成功，准备切换到主页面")
                 self.current_account = account_name
 
                 # 使用 QTimer 延迟调用，让界面先刷新
@@ -223,7 +217,6 @@ class MainWindow(QMainWindow):
             if self.api_client.access_token:
                 self.transfer_manager.api_client.access_token = self.api_client.access_token
                 self.transfer_manager.api_client.current_account = self.api_client.current_account
-                logger.info("自动登录：已同步 token 到 transfer_manager")
 
             # 先切换到文件管理页面
             self.switch_to_file_manage_page()
@@ -232,7 +225,6 @@ class MainWindow(QMainWindow):
 
             # 更新状态栏
             self.status_label.setText(f"已自动登录: {self.current_account}，正在加载数据...")
-            logger.info("自动登录：已切换到主页面，开始加载数据...")
 
             # 延迟加载，让界面先显示
             QTimer.singleShot(100, self._start_async_login)
@@ -251,7 +243,6 @@ class MainWindow(QMainWindow):
             def load_in_thread():
                 try:
                     user_info = self.api_client.get_user_info()
-                    logger.info(f"[ASYNC] 获取到用户信息")
                     # 使用 functools.partial 确保回调不被垃圾回收
                     callback = functools.partial(self._process_user_info, user_info)
                     QTimer.singleShot(0, callback)
@@ -269,7 +260,6 @@ class MainWindow(QMainWindow):
 
     def _process_user_info(self, user_info):
         """处理用户信息（在主线程中调用）"""
-        logger.info(f"[ASYNC] 处理用户信息")
         self._cached_user_info = user_info
         self.show_status_progress("正在加载配额信息...")
 
@@ -277,7 +267,6 @@ class MainWindow(QMainWindow):
         def load_quota_in_thread():
             try:
                 quota_info = self.api_client.get_quota()
-                logger.info(f"[ASYNC] 获取到配额信息")
                 callback = functools.partial(self._process_quota_info, quota_info)
                 QTimer.singleShot(0, callback)
             except Exception as e:
@@ -290,7 +279,6 @@ class MainWindow(QMainWindow):
 
     def _process_quota_info(self, quota_info):
         """处理配额信息（在主线程中调用）"""
-        logger.info(f"[ASYNC] 处理配额信息")
         self._cached_quota_info = quota_info
 
         # 更新UI显示
@@ -405,7 +393,6 @@ class MainWindow(QMainWindow):
                 uk = self._cached_user_info.get('uk')
                 if uk:
                     self.transfer_manager.set_user_uk(uk)
-                    logger.info(f"自动登录：设置用户UK成功: {uk}")
 
             # 恢复未完成的任务
             self.transfer_manager.resume_incomplete_tasks()
@@ -3006,7 +2993,6 @@ class MainWindow(QMainWindow):
         def load_in_thread():
             try:
                 user_info = self.api_client.get_user_info()
-                logger.info(f"[ASYNC] 获取到用户信息")
                 callback = functools.partial(self._manual_process_user_info, user_info)
                 QTimer.singleShot(0, callback)
             except Exception as e:
@@ -3019,7 +3005,6 @@ class MainWindow(QMainWindow):
 
     def _manual_process_user_info(self, user_info):
         """处理用户信息（手动登录）"""
-        logger.info(f"[ASYNC] 处理用户信息")
         self._cached_user_info = user_info
         self.show_status_progress("正在加载配额信息...")
 
@@ -3027,7 +3012,6 @@ class MainWindow(QMainWindow):
         def load_quota_in_thread():
             try:
                 quota_info = self.api_client.get_quota()
-                logger.info(f"[ASYNC] 获取到配额信息")
                 callback = functools.partial(self._manual_process_quota_info, quota_info)
                 QTimer.singleShot(0, callback)
             except Exception as e:
@@ -3040,7 +3024,6 @@ class MainWindow(QMainWindow):
 
     def _manual_process_quota_info(self, quota_info):
         """处理配额信息（手动登录）"""
-        logger.info(f"[ASYNC] 处理配额信息")
         self._cached_quota_info = quota_info
 
         # 更新UI显示

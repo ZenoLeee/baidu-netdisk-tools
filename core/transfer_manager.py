@@ -194,11 +194,9 @@ class TransferManager:
     def set_user_uk(self, uk):
         """设置当前用户UK（登录成功后调用）"""
         self.current_user_uk = uk
-        logger.info(f"设置当前用户UK: {uk}")
 
         # 保存所有待保存的任务
         if self.pending_save_tasks:
-            logger.info(f"保存 {len(self.pending_save_tasks)} 个待保存任务的断点数据")
             for task in self.pending_save_tasks:
                 if task.local_path:
                     # 上传任务需要 chunk_size > 0，下载任务直接保存
@@ -1455,22 +1453,18 @@ class TransferManager:
         if self.tasks_loaded:
             return  # 已经加载过了
 
-        logger.info(f"开始恢复用户 {self.current_user_uk} 的未完成任务...")
         resumed_count = 0
         invalid_count = 0
 
         # 获取当前用户的断点续传文件
         resume_file = self._get_resume_file_path()
         if not resume_file or not os.path.exists(resume_file):
-            logger.info(f"未找到用户 {self.current_user_uk} 的断点续传数据")
             self.tasks_loaded = True
             return
 
         try:
             with open(resume_file, 'r', encoding='utf-8') as f:
                 all_tasks_data = json.load(f)
-
-            logger.info(f"找到 {len(all_tasks_data)} 个未完成任务")
 
             # 遍历所有任务
             for task_id_str, resume_data in all_tasks_data.items():

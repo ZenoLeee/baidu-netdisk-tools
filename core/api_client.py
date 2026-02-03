@@ -324,7 +324,6 @@ class BaiduPanAPI:
             order: 排序字段
             desc: 是否降序
         """
-        logger.info(f"list_files called with path: {path}, start: {start}, limit: {limit}")
         params = {
             'method': 'list',
             'dir': path,

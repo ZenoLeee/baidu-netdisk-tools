@@ -236,8 +236,6 @@ def main():
 
         logger.info("=" * 50)
         logger.info("程序启动中...")
-        logger.info(f"sys.executable: {sys.executable}")
-        logger.info(f"sys.frozen: {getattr(sys, 'frozen', False)}")
         for handler in logger.handlers:
             handler.flush()
 
@@ -261,15 +259,6 @@ def main():
         window = MainWindow()
 
         logger.info('应用程序启动成功')
-
-        # 程序启动成功后，删除调试日志文件（已不需要）
-        try:
-            debug_log_path = os.path.join(os.path.dirname(sys.executable), 'update_debug.log')
-            if os.path.exists(debug_log_path):
-                os.remove(debug_log_path)
-                logger.info("已删除调试日志文件")
-        except Exception as e:
-            logger.warning(f"删除调试日志失败: {e}")
 
         # 运行应用
         return app.exec_()
