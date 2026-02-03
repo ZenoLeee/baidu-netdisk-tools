@@ -204,7 +204,16 @@ class MainWindow(QMainWindow):
                 self.transfer_manager.api_client.current_account = self.api_client.current_account
                 logger.info("自动登录：已同步 token 到 transfer_manager")
 
-            # 更新用户信息
+            # 先切换到文件管理页面
+            self.switch_to_file_manage_page()
+            self.tab_container.setVisible(True)
+            self.user_info_widget.setVisible(True)
+
+            # 更新状态栏
+            self.status_label.setText(f"已自动登录: {self.current_account}")
+            logger.info("自动登录：已切换到主页面，开始加载数据...")
+
+            # 同步加载用户信息
             self.update_user_info()
 
             # 设置用户UK到 transfer_manager
@@ -226,20 +235,8 @@ class MainWindow(QMainWindow):
             logger.info("自动登录：开始恢复未完成的任务...")
             self.transfer_manager.resume_incomplete_tasks()
 
-            # 获取根目录
-            result = self.get_list_files()
-            self.set_list_items(result)
-
-            # 切换到文件管理页面
-            self.switch_to_file_manage_page()
-
-            self.tab_container.setVisible(True)
-
-            self.user_info_widget.setVisible(True)
-
-            # 更新状态栏
-            self.status_label.setText(f"已自动登录: {self.current_account}")
-            logger.info("自动登录完成并切换到主页面")
+            # 异步加载文件列表（使用现有的线程安全方法）
+            QTimer.singleShot(100, lambda: self.update_items("/"))
 
         except Exception as e:
             logger.warning(f"完成自动登录时出错: {e}")
@@ -2804,7 +2801,7 @@ class MainWindow(QMainWindow):
 
     def on_login_success(self, result):
         """登录成功处理"""
-        print(f"登录成功，账号: {result['account_name']}")  # 添加调试信息
+        print(f"登录成功，账号: {result['account_name']}")
         logger.info(f"🔐 登录成功，账号: {result['account_name']}")
 
         self.current_account = result['account_name']
@@ -2812,53 +2809,39 @@ class MainWindow(QMainWindow):
         logger.info("📦 初始化 API 客户端...")
         self.initialize_api_client()
 
-        logger.info("👤 更新用户信息...")
-        self.update_user_info()
-
-        # 设置用户UK到 transfer_manager（必须在 initialize_api_client 之后）
-        logger.info("🔑 准备设置用户UK到 transfer_manager...")
-        try:
-            logger.info(f"当前 API 客户端状态: access_token={bool(self.api_client.access_token)}")
-
-            user_info = self.api_client.get_user_info()
-            logger.info(f"获取用户信息结果: {bool(user_info)}")
-
-            if user_info:
-                logger.info(f"用户信息内容: {user_info}")
-                uk = user_info.get('uk')
-                logger.info(f"提取的UK: {uk}")
-
-                if uk:
-                    self.transfer_manager.set_user_uk(uk)
-                    logger.info(f"✅ 设置用户UK成功: {uk}")
-                else:
-                    logger.warning("⚠️ 用户信息中未找到UK字段")
-                    logger.warning(f"用户信息键: {list(user_info.keys())}")
-            else:
-                logger.warning("⚠️ 获取用户信息失败或返回空值")
-        except Exception as e:
-            logger.error(f"❌ 获取或设置用户UK失败: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-
-        # 恢复未完成的任务
-        logger.info("📋 登录成功，开始恢复未完成的任务...")
-        self.transfer_manager.resume_incomplete_tasks()
-
-        # 先切换到文件管理页面
+        # 先切换到文件管理页面（快速显示界面）
         self.switch_to_file_manage_page()
-
-        # 显示导航按钮和用户信息
         self.tab_container.setVisible(True)
-
         self.user_info_widget.setVisible(True)
 
         # 更新状态栏
         self.status_label.setText(f"已登录: {self.current_account}")
+        logger.info("已切换到主页面，开始加载数据...")
 
-        # 加载根目录文件列表
-        logger.info("📂 加载根目录文件列表...")
-        self.update_items("/")
+        # 同步加载用户信息（通常很快）
+        self.update_user_info()
+
+        # 设置用户UK到 transfer_manager
+        try:
+            user_info = self.api_client.get_user_info()
+            if user_info:
+                uk = user_info.get('uk')
+                if uk:
+                    self.transfer_manager.set_user_uk(uk)
+                    logger.info(f"设置用户UK成功: {uk}")
+                else:
+                    logger.warning("用户信息中未找到UK字段")
+            else:
+                logger.warning("获取用户信息失败")
+        except Exception as e:
+            logger.error(f"获取或设置用户UK失败: {e}")
+
+        # 恢复未完成的任务
+        logger.info("恢复未完成的任务...")
+        self.transfer_manager.resume_incomplete_tasks()
+
+        # 异步加载文件列表（使用现有的线程安全方法）
+        QTimer.singleShot(100, lambda: self.update_items("/"))
 
     def initialize_api_client(self):
         self.api_client = BaiduPanAPI()
