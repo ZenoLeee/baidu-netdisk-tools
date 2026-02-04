@@ -340,18 +340,22 @@ class BaiduPanAPI:
             file_list = result.get('list', [])
             logger.info(f"成功获取文件列表: {len(file_list)} 个项目")
 
-            # 验证返回数据的完整性
+            # 只保留必要的字段
             validated_list = []
             for idx, file in enumerate(file_list):
                 if isinstance(file, dict):
-                    # 确保必需的字段存在
+                    # 只保存必要的字段
                     validated_file = {
-                        'server_filename': file.get('server_filename', '未知文件'),
                         'path': file.get('path', ''),
-                        'isdir': file.get('isdir', 0),
-                        'fs_id': file.get('fs_id', ''),
+                        'server_filename': file.get('server_filename', '未知文件'),
                         'size': file.get('size', 0),
-                        'server_mtime': file.get('server_mtime', 0)
+                        'local_mtime': file.get('local_mtime', 0),
+                        'local_ctime': file.get('local_ctime', 0),
+                        'isdir': file.get('isdir', 0),
+                        'category': file.get('category', 0),
+                        'md5': file.get('md5', ''),
+                        'fs_id': file.get('fs_id', ''),
+                        'oper_id': file.get('oper_id', 0),
                     }
                     validated_list.append(validated_file)
                 else:

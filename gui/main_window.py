@@ -38,6 +38,7 @@ class ClickableLabel(QLabel):
 
 
 from gui.share_dialog import ShareDialog
+from gui.file_properties_dialog import FilePropertiesDialog
 from core.api_client import BaiduPanAPI
 from gui.style import AppStyles
 from utils.logger import get_logger
@@ -653,7 +654,6 @@ class MainWindow(QMainWindow):
                 border: 1px solid #ccc;
                 border-radius: 4px;
                 background: white;
-                min-width: 80px;
             }
             QComboBox:focus {
                 border: 1px solid #4A90E2;
@@ -674,7 +674,7 @@ class MainWindow(QMainWindow):
         # 搜索按钮
         self.search_btn = QPushButton("搜索")
         self.search_btn.setObjectName("primary")
-        self.search_btn.setMaximumWidth(60)
+        self.search_btn.setMaximumWidth(50)
         self.search_btn.setMinimumWidth(50)
         self.search_btn.clicked.connect(self.on_search)
         button_layout.addWidget(search_container)
@@ -2559,6 +2559,7 @@ class MainWindow(QMainWindow):
 
                 menu.addSeparator()
                 menu.addAction("🔗 分享", lambda: self.create_share_link(data))
+                menu.addAction("ℹ️ 属性", lambda: self.show_file_properties(data))
                 menu.addSeparator()
                 menu.addAction("✏️ 重命名", lambda: self.rename_file(item))
                 menu.addAction("🗑️ 删除", lambda: self.delete_file(data))
@@ -2575,6 +2576,16 @@ class MainWindow(QMainWindow):
             menu.addAction("✓ 全选", self.file_table.selectAll)
 
         menu.exec_(self.file_table.viewport().mapToGlobal(position))
+
+    def show_file_properties(self, file_data):
+        """显示文件属性对话框"""
+        try:
+            dialog = FilePropertiesDialog(file_data, self)
+            dialog.exec_()
+        except Exception as e:
+            logger.error(f"显示文件属性失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     def copy_item_text(self, text):
         """复制文本"""
@@ -3260,16 +3271,8 @@ class MainWindow(QMainWindow):
                 isdir = file.get('isdir', 0)
                 fs_id = file.get('fs_id', '')
 
-                # 保存完整的文件信息到 UserRole（包括 size 和 server_mtime）
-                file_data = {
-                    'path': path,
-                    'is_dir': isdir,
-                    'fs_id': fs_id,
-                    'size': file.get('size', 0),
-                    'mtime': file.get('server_mtime', 0),  # 使用 server_mtime 字段
-                    'server_filename': server_filename
-                }
-                name_item.setData(Qt.UserRole, file_data)
+                # 直接保存完整的文件信息到 UserRole
+                name_item.setData(Qt.UserRole, file)
 
                 tooltip_text = f"路径: {path}"
                 if not isdir:
@@ -3287,7 +3290,7 @@ class MainWindow(QMainWindow):
                 size_str = FileUtils.format_size(size) if not isdir else ""
                 self.file_table.setItem(row, 1, QTableWidgetItem(size_str))
 
-                mtime = file.get('server_mtime', 0)
+                mtime = file.get('local_mtime', 0)
                 time_str = FileUtils.format_time(mtime)
                 self.file_table.setItem(row, 2, QTableWidgetItem(time_str))
 
