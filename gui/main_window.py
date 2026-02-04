@@ -258,6 +258,8 @@ class MainWindow(QMainWindow):
     def _start_async_login(self):
         """开始异步加载数据（使用 threading + QTimer 回调，避免 Worker 崩溃）"""
         try:
+            # 禁用所有按钮
+            self._set_all_buttons_enabled(False)
             self.show_status_progress("正在加载用户信息...")
 
             # 在后台线程中加载数据
@@ -277,6 +279,8 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             logger.error(f"启动异步加载失败: {e}")
+            # 出错时也要启用按钮
+            self._set_all_buttons_enabled(True)
             QTimer.singleShot(10, self._load_login_data_sync)
 
     def _process_user_info(self, user_info):
@@ -3093,6 +3097,30 @@ class MainWindow(QMainWindow):
         from utils.file_utils import FileUtils
         return FileUtils.format_size(size_bytes)
 
+    def _set_all_buttons_enabled(self, enabled):
+        """设置所有按钮的启用状态"""
+        # 导航按钮
+        buttons = [
+            getattr(self, 'file_manage_btn', None),
+            getattr(self, 'transfer_btn', None),
+            getattr(self, 'switch_account_btn', None),
+            # 文件操作按钮
+            getattr(self, 'upload_btn', None),
+            getattr(self, 'download_btn', None),
+            getattr(self, 'create_folder_btn', None),
+            getattr(self, 'refresh_btn', None),
+            # 搜索按钮
+            getattr(self, 'search_btn', None),
+        ]
+
+        for btn in buttons:
+            if btn:
+                btn.setEnabled(enabled)
+
+        # 如果有传输页面，也禁用其按钮
+        if self.transfer_page:
+            self._set_transfer_buttons_enabled(enabled)
+
     def _set_transfer_buttons_enabled(self, enabled):
         """设置传输页面按钮的启用状态"""
         if not self.transfer_page:
@@ -3369,7 +3397,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"已加载 {len(result)} 个项目")
         self.current_worker = None
         # 重新启用所有按钮
-        self._set_transfer_buttons_enabled(True)
+        self._set_all_buttons_enabled(True)
 
         # 刷新剪切状态的视觉效果
         self._refresh_cut_visual_state()
@@ -3382,7 +3410,7 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "错误", f"获取目录失败：{error_msg}")
         self.current_worker = None
         # 重新启用所有按钮
-        self._set_transfer_buttons_enabled(True)
+        self._set_all_buttons_enabled(True)
 
     def get_list_files(self, path: str = '/'):
         if not self.api_client:
