@@ -257,25 +257,42 @@ class MainWindow(QMainWindow):
             self.stacked_widget.setCurrentWidget(self.login_page)
 
     def _start_async_login(self):
-        """开始异步加载数据（使用 threading + QTimer 回调，避免 Worker 崩溃）"""
+        """开始异步加载数据 - 并行加载三个请求"""
         try:
             # 禁用所有按钮
             self._set_all_buttons_enabled(False)
-            self.show_status_progress("正在加载用户信息...")
+            self.show_status_progress("正在加载数据...")
 
-            # 在后台线程中加载数据
-            def load_in_thread():
+            # 在后台线程中并行加载所有数据
+            def load_all_in_thread():
                 try:
-                    user_info = self.api_client.get_user_info()
-                    # 使用 functools.partial 确保回调不被垃圾回收
-                    callback = functools.partial(self._process_user_info, user_info)
-                    QTimer.singleShot(0, callback)
-                except Exception as e:
-                    logger.error(f"获取用户信息失败: {e}")
-                    callback = functools.partial(self._process_user_info, None)
+                    import concurrent.futures
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                        # 同时提交三个任务
+                        future_user = executor.submit(self.api_client.get_user_info)
+                        future_quota = executor.submit(self.api_client.get_quota)
+                        future_files = executor.submit(self.api_client.list_files, '/')
+
+                        # 等待所有任务完成
+                        results = {}
+                        for future, name in [(future_user, 'user'), (future_quota, 'quota'), (future_files, 'files')]:
+                            try:
+                                results[name] = future.result()
+                            except Exception as e:
+                                logger.error(f"加载{name}失败: {e}")
+                                results[name] = None
+
+                    # 所有请求完成后，通过回调更新UI
+                    callback = functools.partial(self._process_auto_login_data, results)
                     QTimer.singleShot(0, callback)
 
-            thread = threading.Thread(target=load_in_thread, daemon=True)
+                except Exception as e:
+                    logger.error(f"并行加载数据出错: {e}")
+                    callback = functools.partial(self._process_auto_login_data, {})
+                    QTimer.singleShot(0, callback)
+
+            thread = threading.Thread(target=load_all_in_thread, daemon=True)
             thread.start()
 
         except Exception as e:
@@ -284,31 +301,15 @@ class MainWindow(QMainWindow):
             self._set_all_buttons_enabled(True)
             QTimer.singleShot(10, self._load_login_data_sync)
 
-    def _process_user_info(self, user_info):
-        """处理用户信息（在主线程中调用）"""
+    def _process_auto_login_data(self, results):
+        """处理自动登录的所有数据"""
+        # 更新用户信息和配额
+        user_info = results.get('user')
+        quota_info = results.get('quota')
+
         self._cached_user_info = user_info
-        self.show_status_progress("正在加载配额信息...")
-
-        # 继续在后台线程中加载配额
-        def load_quota_in_thread():
-            try:
-                quota_info = self.api_client.get_quota()
-                callback = functools.partial(self._process_quota_info, quota_info)
-                QTimer.singleShot(0, callback)
-            except Exception as e:
-                logger.error(f"获取配额信息失败: {e}")
-                callback = functools.partial(self._process_quota_info, None)
-                QTimer.singleShot(0, callback)
-
-        thread = threading.Thread(target=load_quota_in_thread, daemon=True)
-        thread.start()
-
-    def _process_quota_info(self, quota_info):
-        """处理配额信息（在主线程中调用）"""
         self._cached_quota_info = quota_info
 
-        # 更新UI显示
-        user_info = self._cached_user_info
         if user_info and quota_info:
             used = quota_info.get('used', 0)
             total = quota_info.get('total', 0)
@@ -323,8 +324,11 @@ class MainWindow(QMainWindow):
             self.user_info_label_nav.setText(f"{baidu_name}")
             logger.info(f"用户: {baidu_name} (UK: {uk})")
 
+        # 恢复按钮状态
+        self._set_all_buttons_enabled(True)
+
         self.show_status_progress("正在恢复任务...")
-        QTimer.singleShot(10, self._finish_auto_login)
+        QTimer.singleShot(10, lambda: self._finish_auto_login_with_files(results.get('files')))
 
     def _on_user_info_loaded(self, user_info):
         """用户信息加载完成"""
@@ -379,14 +383,23 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(10, self._finish_auto_login)
 
     def _load_login_data_sync(self):
-        """同步加载登录数据（备用方案）"""
+        """同步加载登录数据（备用方案）- 并行加载"""
         try:
-            self.show_status_progress("正在加载用户信息...")
-            user_info = self.api_client.get_user_info()
-            self._cached_user_info = user_info
+            import concurrent.futures
 
-            self.show_status_progress("正在加载配额信息...")
-            quota_info = self.api_client.get_quota()
+            self.show_status_progress("正在加载数据...")
+
+            # 并行加载所有数据
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                future_user = executor.submit(self.api_client.get_user_info)
+                future_quota = executor.submit(self.api_client.get_quota)
+                future_files = executor.submit(self.api_client.list_files, '/')
+
+                user_info = future_user.result()
+                quota_info = future_quota.result()
+                files = future_files.result()
+
+            self._cached_user_info = user_info
             self._cached_quota_info = quota_info
 
             # 更新UI显示
@@ -404,12 +417,16 @@ class MainWindow(QMainWindow):
                 self.user_info_label_nav.setText(f"{baidu_name}")
                 logger.info(f"用户: {baidu_name} (UK: {uk})")
 
+            # 恢复按钮状态
+            self._set_all_buttons_enabled(True)
+
             self.show_status_progress("正在恢复任务...")
         except Exception as e:
             logger.error(f"加载登录数据时出错: {e}")
+            files = None
 
         # 设置UK并恢复任务
-        QTimer.singleShot(10, self._finish_auto_login)
+        QTimer.singleShot(10, lambda: self._finish_auto_login_with_files(files))
 
     def _finish_auto_login(self):
         """完成自动登录"""
@@ -428,6 +445,34 @@ class MainWindow(QMainWindow):
         # 隐藏进度条并加载文件列表
         self.hide_status_progress()
         QTimer.singleShot(10, lambda: self.update_items("/"))
+
+    def _finish_auto_login_with_files(self, files):
+        """完成自动登录（带文件列表）"""
+        try:
+            # 设置UK
+            if self._cached_user_info:
+                uk = self._cached_user_info.get('uk')
+                if uk:
+                    self.transfer_manager.set_user_uk(uk)
+                    logger.info(f"设置用户UK成功: {uk}")
+
+            # 恢复未完成的任务
+            self.transfer_manager.resume_incomplete_tasks()
+        except Exception as e:
+            logger.error(f"完成自动登录时出错: {e}")
+
+        # 隐藏进度条
+        self.hide_status_progress()
+
+        # 如果已经有文件列表，直接显示
+        if files:
+            self.current_path = '/'
+            self.set_list_items(files)
+            # 加载完成后恢复按钮状态
+            self._set_all_buttons_enabled(True)
+        else:
+            # 否则重新加载
+            QTimer.singleShot(10, lambda: self.update_items("/"))
 
     def setup_ui(self):
         """设置UI"""
@@ -674,8 +719,8 @@ class MainWindow(QMainWindow):
         # 搜索按钮
         self.search_btn = QPushButton("搜索")
         self.search_btn.setObjectName("primary")
-        self.search_btn.setMaximumWidth(50)
-        self.search_btn.setMinimumWidth(50)
+        self.search_btn.setMaximumWidth(60)
+        self.search_btn.setMinimumWidth(60)
         self.search_btn.clicked.connect(self.on_search)
         button_layout.addWidget(search_container)
         button_layout.addWidget(self.search_category_combo)
@@ -3446,48 +3491,51 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self._start_manual_async_login)
 
     def _start_manual_async_login(self):
-        """开始手动登录异步加载数据"""
-        self.show_status_progress("正在加载用户信息...")
+        """开始手动登录异步加载数据 - 并行加载三个请求"""
+        self.show_status_progress("正在加载数据...")
 
-        # 在后台线程中加载数据
-        def load_in_thread():
+        # 使用线程池并行加载三个请求
+        import concurrent.futures
+
+        def load_all_data():
+            """并行加载所有数据"""
             try:
-                user_info = self.api_client.get_user_info()
-                callback = functools.partial(self._manual_process_user_info, user_info)
-                QTimer.singleShot(0, callback)
-            except Exception as e:
-                logger.error(f"后台线程出错: {e}")
-                callback = functools.partial(self._manual_process_user_info, None)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                    # 同时提交三个任务
+                    future_user = executor.submit(self.api_client.get_user_info)
+                    future_quota = executor.submit(self.api_client.get_quota)
+                    future_files = executor.submit(self.api_client.list_files, '/')
+
+                    # 等待所有任务完成
+                    results = {}
+                    for future, name in [(future_user, 'user'), (future_quota, 'quota'), (future_files, 'files')]:
+                        try:
+                            results[name] = future.result()
+                        except Exception as e:
+                            logger.error(f"加载{name}失败: {e}")
+                            results[name] = None
+
+                # 所有请求完成后，通过回调更新UI
+                callback = functools.partial(self._process_all_initial_data, results)
                 QTimer.singleShot(0, callback)
 
-        thread = threading.Thread(target=load_in_thread, daemon=True)
+            except Exception as e:
+                logger.error(f"并行加载数据出错: {e}")
+                callback = functools.partial(self._process_all_initial_data, {})
+                QTimer.singleShot(0, callback)
+
+        thread = threading.Thread(target=load_all_data, daemon=True)
         thread.start()
 
-    def _manual_process_user_info(self, user_info):
-        """处理用户信息（手动登录）"""
+    def _process_all_initial_data(self, results):
+        """处理所有初始加载的数据"""
+        # 更新用户信息和配额
+        user_info = results.get('user')
+        quota_info = results.get('quota')
+
         self._cached_user_info = user_info
-        self.show_status_progress("正在加载配额信息...")
-
-        # 继续在后台线程中加载配额
-        def load_quota_in_thread():
-            try:
-                quota_info = self.api_client.get_quota()
-                callback = functools.partial(self._manual_process_quota_info, quota_info)
-                QTimer.singleShot(0, callback)
-            except Exception as e:
-                logger.error(f"后台线程出错: {e}")
-                callback = functools.partial(self._manual_process_quota_info, None)
-                QTimer.singleShot(0, callback)
-
-        thread = threading.Thread(target=load_quota_in_thread, daemon=True)
-        thread.start()
-
-    def _manual_process_quota_info(self, quota_info):
-        """处理配额信息（手动登录）"""
         self._cached_quota_info = quota_info
 
-        # 更新UI显示
-        user_info = self._cached_user_info
         if user_info and quota_info:
             used = quota_info.get('used', 0)
             total = quota_info.get('total', 0)
@@ -3503,7 +3551,35 @@ class MainWindow(QMainWindow):
             logger.info(f"用户: {baidu_name} (UK: {uk})")
 
         self.show_status_progress("正在恢复任务...")
-        QTimer.singleShot(10, self._finish_login)
+        QTimer.singleShot(10, lambda: self._finish_login_with_files(results.get('files')))
+
+    def _finish_login_with_files(self, files):
+        """完成登录（带文件列表）"""
+        try:
+            # 设置UK
+            if self._cached_user_info:
+                uk = self._cached_user_info.get('uk')
+                if uk:
+                    self.transfer_manager.set_user_uk(uk)
+                    logger.info(f"设置用户UK成功: {uk}")
+
+            # 恢复未完成的任务
+            self.transfer_manager.resume_incomplete_tasks()
+        except Exception as e:
+            logger.error(f"完成登录时出错: {e}")
+
+        # 隐藏进度条
+        self.hide_status_progress()
+
+        # 如果已经有文件列表，直接显示
+        if files:
+            self.current_path = '/'
+            self.set_list_items(files)
+            # 加载完成后恢复按钮状态
+            self._set_all_buttons_enabled(True)
+        else:
+            # 否则重新加载
+            QTimer.singleShot(10, lambda: self.update_items("/"))
 
     def _on_manual_user_info_loaded(self, user_info):
         """手动登录 - 用户信息加载完成"""
