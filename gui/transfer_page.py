@@ -715,7 +715,8 @@ class TransferPage(QWidget):
             # 检查文件是否存在于网盘中
             api_client = self.parent_window.api_client
             parent_dir = os.path.dirname(remote_path)
-            file_list = api_client.list_files(parent_dir if parent_dir else '/')
+            result = api_client.list_files(parent_dir if parent_dir else '/')
+            file_list = result.get('list', [])
 
             file_exists = False
             for f in file_list:

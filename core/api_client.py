@@ -338,7 +338,7 @@ class BaiduPanAPI:
 
         if result and result.get('errno') == 0:
             file_list = result.get('list', [])
-            logger.info(f"成功获取文件列表: {len(file_list)} 个项目")
+            logger.debug(f"成功获取文件列表: {len(file_list)} 个项目")
 
             # 只保留必要的字段
             validated_list = []
@@ -371,6 +371,117 @@ class BaiduPanAPI:
             else:
                 logger.error("获取文件列表失败: 请求返回空")
             return []
+
+    def list_files_recursive(self, path: str = '/', recursion: int = 1, start: int = 0) -> Dict[str, Any]:
+        """
+        递归获取文件列表（包括所有子目录中的文件）
+
+        Args:
+            path: 目录路径
+            recursion: 是否递归，1=递归，0=仅当前目录
+            start: 起始位置，用于分页
+
+        Returns:
+            Dict包含:
+                - list: 文件列表
+                - has_more: 是否还有更多数据
+                - cursor: 当前已获取的文件总数
+                - error: 错误信息（如果有）
+
+        错误码说明:
+            - 42213: 没有共享目录的权限
+            - 31034: 命中频控，listall接口的请求频率建议不超过每分钟8-10次
+            - 31066: 文件不存在
+        """
+        params = {
+            'method': 'listall',
+            'path': path,
+            'recursion': recursion,
+            'web': 1,
+            'start': start,
+            'limit': 1000  # 每次最多获取1000个文件
+        }
+
+        result = self._make_request('GET', '/rest/2.0/xpan/multimedia', params=params)
+
+        # 检查result是否为字典（可能返回字符串错误）
+        if not isinstance(result, dict):
+            error_msg = str(result) if result else '未知错误'
+            logger.error(f"递归获取文件列表失败: {error_msg}")
+
+            return {
+                'list': [],
+                'has_more': 0,
+                'cursor': 0,
+                'error': {
+                    'errno': -1,
+                    'msg': error_msg
+                }
+            }
+
+        if result.get('errno') == 0:
+            file_list = result.get('list', [])
+            has_more = result.get('has_more', 0)
+            cursor = result.get('cursor', 0)  # cursor是已获取的文件总数
+
+            logger.debug(f"递归获取文件列表成功: {len(file_list)} 个文件, start={start}, has_more={has_more}, cursor={cursor}")
+
+            # 只保留必要的字段
+            validated_list = []
+            for idx, file in enumerate(file_list):
+                if isinstance(file, dict):
+                    # 只保存必要的字段
+                    validated_file = {
+                        'path': file.get('path', ''),
+                        'server_filename': file.get('server_filename', '未知文件'),
+                        'size': file.get('size', 0),
+                        'local_mtime': file.get('local_mtime', 0),
+                        'local_ctime': file.get('local_ctime', 0),
+                        'isdir': file.get('isdir', 0),
+                        'category': file.get('category', 0),
+                        'md5': file.get('md5', ''),
+                        'fs_id': file.get('fs_id', ''),
+                        'oper_id': file.get('oper_id', 0),
+                    }
+                    validated_list.append(validated_file)
+                else:
+                    logger.warning(f"跳过无效的文件项 (index={idx}): {type(file)}")
+
+            logger.debug(f"验证后的文件列表: {len(validated_list)} 个有效项目")
+
+            return {
+                'list': validated_list,
+                'has_more': has_more,
+                'cursor': cursor,  # 返回cursor，用于计算下一次的start
+                'error': None
+            }
+        else:
+            error_msg = '未知错误'
+            errno = result.get('errno', -1)
+            has_more = 0
+            cursor = 0
+
+            if errno == 42213:
+                error_msg = '没有共享目录的权限'
+            elif errno == 31034:
+                error_msg = '命中频控，listall接口的请求频率建议不超过每分钟8-10次'
+                logger.warning(f"递归获取文件列表频控: {error_msg}")
+            elif errno == 31066:
+                error_msg = '文件不存在'
+            else:
+                error_msg = result.get('errmsg', '未知错误')
+
+            logger.error(f"递归获取文件列表失败: {error_msg}, errno: {errno}")
+
+            return {
+                'list': [],
+                'has_more': has_more,
+                'cursor': cursor,
+                'error': {
+                    'errno': errno,
+                    'msg': error_msg
+                }
+            }
 
     def search_files(self, keyword: str, path: str = '/', category: int = None, page: int = 1, recursion: int = 1) -> Optional[Dict[str, Any]]:
         """
@@ -462,10 +573,10 @@ class BaiduPanAPI:
 
     def delete_files(self, file_paths: List[str]) -> Dict[str, Any]:
         """
-        批量删除文件
+        批量删除文件或文件夹
 
         Args:
-            file_paths: 文件路径列表
+            file_paths: 文件或文件夹路径列表
         """
         filelist = [{'path': path} for path in file_paths]
         return self.batch_operation('delete', filelist)

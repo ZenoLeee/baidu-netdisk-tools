@@ -39,6 +39,7 @@ class ClickableLabel(QLabel):
 
 from gui.share_dialog import ShareDialog
 from gui.file_properties_dialog import FilePropertiesDialog
+from gui.duplicate_finder_dialog import FolderSelectDialog
 from core.api_client import BaiduPanAPI
 from gui.style import AppStyles
 from utils.logger import get_logger
@@ -806,9 +807,11 @@ class MainWindow(QMainWindow):
         functions_layout = QVBoxLayout(functions_frame)
 
         # 功能按钮1
-        scan_btn = QPushButton('🔍 扫描重复文件')
-        scan_btn.setMinimumHeight(50)
-        functions_layout.addWidget(scan_btn)
+        self.scan_btn = QPushButton('🔍 扫描重复文件')
+        self.scan_btn.setMinimumHeight(50)
+        self.scan_btn.clicked.connect(self.show_duplicate_finder)
+        self.scan_btn.setEnabled(False)  # 初始禁用，等文件列表加载完成后启用
+        functions_layout.addWidget(self.scan_btn)
 
         main_layout.addWidget(functions_frame)
 
@@ -2632,6 +2635,20 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
 
+    def show_duplicate_finder(self):
+        """显示文件去重对话框"""
+        try:
+            if not self.api_client:
+                QMessageBox.warning(self, '提示', '请先登录')
+                return
+
+            dialog = FolderSelectDialog(self.api_client, self)
+            dialog.exec_()
+        except Exception as e:
+            logger.error(f"显示去重对话框失败: {e}")
+            import traceback
+            traceback.print_exc()
+
     def copy_item_text(self, text):
         """复制文本"""
         clipboard = QApplication.clipboard()
@@ -3167,6 +3184,8 @@ class MainWindow(QMainWindow):
             getattr(self, 'refresh_btn', None),
             # 搜索按钮
             getattr(self, 'search_btn', None),
+            # 去重按钮（只有在文件列表加载后才启用）
+            getattr(self, 'scan_btn', None),
         ]
 
         for btn in buttons:
@@ -3364,9 +3383,9 @@ class MainWindow(QMainWindow):
                 logger.warning(f"数据格式错误: row={row}, data type={type(data)}")
                 return
 
-            is_dir = data.get('is_dir', 0)
+            isdir = data.get('isdir', 0)
 
-            if not is_dir:
+            if not isdir:
                 # 如果是文件，可以下载
                 path = data.get('path', '')
                 if path:
@@ -3463,7 +3482,8 @@ class MainWindow(QMainWindow):
     def get_list_files(self, path: str = '/'):
         if not self.api_client:
             return []
-        return self.api_client.list_files(path)
+        result = self.api_client.list_files(path)
+        return result.get('list', [])
 
     def on_login_success(self, result):
         """登录成功处理"""
