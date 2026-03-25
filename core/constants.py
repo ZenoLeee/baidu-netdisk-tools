@@ -113,3 +113,38 @@ class TimeConstants:
     """时间相关常量"""
     TOKEN_REFRESH_ADVANCE = 300  # Token 提前刷新时间（秒）：5分钟
     DEFAULT_TOKEN_EXPIRE = 2592000  # 默认 Token 过期时间（秒）：30天
+
+
+# 文本编辑相关常量
+class TextEditConstants:
+    """文本编辑相关常量"""
+    # 可编辑的文本文件扩展名
+    EDITABLE_EXTENSIONS = [
+        'txt', 'md', 'markdown', 'json', 'xml', 'html', 'htm',
+        'css', 'js', 'ts', 'jsx', 'tsx', 'py', 'java', 'c', 'cpp',
+        'h', 'hpp', 'cs', 'php', 'rb', 'go', 'rs', 'swift', 'kt',
+        'log', 'ini', 'cfg', 'conf', 'yaml', 'yml', 'toml', 'sh',
+        'bat', 'cmd', 'ps1', 'sql', 'csv', 'tsv', 'dockerfile',
+        'gitignore', 'env', 'properties', 'vim', 'emacs', 'rst'
+    ]
+    # 最大可编辑文件大小：10MB
+    MAX_EDITABLE_SIZE = 10 * 1024 * 1024
+    # 编码检测备选列表
+    ENCODING_FALLBACKS = ['utf-8', 'gbk', 'gb2312', 'utf-16', 'ascii']
+
+
+# 媒体播放相关常量
+class MediaConstants:
+    """媒体文件相关常量"""
+    # 视频文件扩展名
+    VIDEO_EXTENSIONS = [
+        'mp4', 'avi', 'mov', 'wmv', 'flv', 'mkv', 'webm',
+        'mpeg', 'mpg', 'm4v', '3gp', 'rm', 'rmvb', 'asf',
+        'divx', 'xvid', 'f4v', 'ts', 'm2ts', 'mts', 'vob'
+    ]
+    # 音频文件扩展名
+    AUDIO_EXTENSIONS = [
+        'mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'wma',
+        'opus', 'aiff', 'au', 'ra', 'amr', 'ac3', 'dts',
+        'ape', 'wv', 'tta', 'mpc', 'dsd', 'mid', 'midi'
+    ]

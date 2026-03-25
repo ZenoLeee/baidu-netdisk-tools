@@ -40,11 +40,12 @@ class ClickableLabel(QLabel):
 from gui.share_dialog import ShareDialog
 from gui.file_properties_dialog import FilePropertiesDialog
 from gui.duplicate_finder_dialog import FolderSelectDialog
+from gui.text_editor_dialog import TextEditorDialog
 from core.api_client import BaiduPanAPI
 from gui.style import AppStyles
 from utils.logger import get_logger
 from utils.config_manager import ConfigManager
-from core.constants import AppConstants, UploadConstants, UIConstants
+from core.constants import AppConstants, UploadConstants, UIConstants, TextEditConstants
 
 # 从新模块导入
 from core.transfer_manager import TransferManager
@@ -2605,6 +2606,21 @@ class MainWindow(QMainWindow):
                 # 文件和文件夹都显示"下载"
                 menu.addAction("⬇️ 下载", lambda: self.download_selected_file())
 
+                # 如果是可编辑的文本文件，显示"编辑"选项
+                # 注意：API 返回的数据使用 'isdir' 而不是 'is_dir'
+                if not data.get('isdir'):
+                    # 从文件名中提取扩展名
+                    server_filename = data.get('server_filename', '')
+                    if '.' in server_filename:
+                        extension = server_filename.rsplit('.', 1)[-1].lower()
+                    else:
+                        extension = ''
+
+                    if extension in TextEditConstants.EDITABLE_EXTENSIONS:
+                        file_size = data.get('size', 0)
+                        if file_size <= TextEditConstants.MAX_EDITABLE_SIZE:
+                            menu.addAction("📝 编辑", lambda: self.edit_text_file(data))
+
                 menu.addSeparator()
                 menu.addAction("🔗 分享", lambda: self.create_share_link(data))
                 menu.addAction("ℹ️ 属性", lambda: self.show_file_properties(data))
@@ -2632,6 +2648,24 @@ class MainWindow(QMainWindow):
             dialog.exec_()
         except Exception as e:
             logger.error(f"显示文件属性失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def edit_text_file(self, file_data):
+        """编辑文本文件"""
+        try:
+            if not self.api_client:
+                QMessageBox.warning(self, '提示', '请先登录')
+                return
+
+            dialog = TextEditorDialog(file_data, self.api_client, self)
+            dialog.exec_()
+
+            # 编辑完成后刷新文件列表
+            self.update_items(self.current_path)
+
+        except Exception as e:
+            logger.error(f"打开文本编辑器失败: {e}")
             import traceback
             traceback.print_exc()
 
@@ -3386,12 +3420,29 @@ class MainWindow(QMainWindow):
             isdir = data.get('isdir', 0)
 
             if not isdir:
-                # 如果是文件，可以下载
-                path = data.get('path', '')
-                if path:
-                    self.download_file(item, path)
+                # 如果是文件，检查是否为可编辑的文本文件
+                # 从文件名中提取扩展名（API 返回的数据可能没有 extension 字段）
+                server_filename = data.get('server_filename', '')
+                if '.' in server_filename:
+                    extension = server_filename.rsplit('.', 1)[-1].lower()
                 else:
-                    logger.warning(f"文件路径为空: row={row}")
+                    extension = ''
+
+                file_size = data.get('size', 0)
+
+                logger.info(f"双击文件: {server_filename}, 扩展名: {extension}, 大小: {file_size}")
+
+                if extension in TextEditConstants.EDITABLE_EXTENSIONS and file_size <= TextEditConstants.MAX_EDITABLE_SIZE:
+                    # 打开文本编辑器
+                    logger.info(f"打开文本编辑器: {server_filename}")
+                    self.edit_text_file(data)
+                else:
+                    # 其他文件，执行下载
+                    path = data.get('path', '')
+                    if path:
+                        self.download_file(item, path)
+                    else:
+                        logger.warning(f"文件路径为空: row={row}")
                 return
 
             path = data.get('path', '')

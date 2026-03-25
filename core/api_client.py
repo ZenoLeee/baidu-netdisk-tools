@@ -914,7 +914,7 @@ class BaiduPanAPI:
             logger.error(f"创建文件请求失败: {e}")
             return {'success': False, 'error': str(e)}
 
-    def upload_file_simple(self, local_path: str, remote_path: str, task=None) -> Dict[str, Any]:
+    def upload_file_simple(self, local_path: str, remote_path: str, task=None, ondup='newcopy') -> Dict[str, Any]:
         """
         小文件单步上传（使用 pcs/file 接口）
 
@@ -922,6 +922,7 @@ class BaiduPanAPI:
             local_path: 本地文件路径
             remote_path: 远程文件路径
             task: 上传任务对象（用于更新进度）
+            ondup: 冲突处理策略，'newcopy'(重命名) 或 'overwrite'(覆盖)，默认 'newcopy'
 
         Returns:
             上传结果
@@ -941,7 +942,7 @@ class BaiduPanAPI:
             'method': 'upload',
             'access_token': self.access_token,
             'path': remote_path,
-            'ondup': 'newcopy'  # 冲突时重命名
+            'ondup': ondup  # 使用传入的参数
         }
 
         try:
