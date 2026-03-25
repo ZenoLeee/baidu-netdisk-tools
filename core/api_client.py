@@ -129,11 +129,12 @@ class BaiduPanAPI:
             if 'access_token' in data:
                 self.current_account = account_name
                 self.access_token = data['access_token']
-                # 获取账户名称
+                # 获取账户名称和UK
                 user_info = self.get_user_info()
                 # 保存账号信息
                 account_data = {
                     'account_name': user_info['baidu_name'],
+                    'uk': user_info.get('uk', ''),  # 保存UK
                     'access_token': data['access_token'],
                     'refresh_token': data['refresh_token'],
                     'expires_at': time.time() + data.get('expires_in', TimeConstants.DEFAULT_TOKEN_EXPIRE),

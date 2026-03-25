@@ -3759,31 +3759,37 @@ class MainWindow(QMainWindow):
         self.setEnabled(False)
         login_dialog.exec_()
 
+    def get_auth_code_for_new_account(self):
+        """为账号切换对话框中的新账号获取授权码"""
+        from gui.login_dialog import WebPopup
+
+        # 创建一个简单的包装对象来接收授权码
+        class AuthCodeReceiver:
+            def __init__(self, callback):
+                self.callback = callback
+                self.code_input = self
+
+            def setText(self, code):
+                """模拟 QLineEdit 的 setText 方法"""
+                self.callback(code)
+
+        # 创建接收器，回调函数将授权码设置到当前对话框
+        def on_code_received(code):
+            if hasattr(self, '_current_account_dialog') and self._current_account_dialog:
+                self._current_account_dialog.code_input.setText(code)
+
+        receiver = AuthCodeReceiver(on_code_received)
+
+        # 创建 WebPopup，传入 receiver 作为 parent_dialog
+        web_popup = WebPopup(receiver)
+        web_popup.exec_()
+
     def show_switch_account_dialog(self):
         """显示切换账号对话框"""
         try:
             if not self.api_client:
                 QMessageBox.warning(self, "提示", "请先登录")
                 return
-
-            # 获取所有已保存的账号
-            all_accounts = self.api_client.get_all_accounts()
-
-            if not all_accounts or len(all_accounts) <= 1:
-                QMessageBox.information(
-                    self,
-                    "提示",
-                    "当前只有一个账号，请先登录其他账号后再切换"
-                )
-                return
-
-            # 重新排序：当前账号排在第一位
-            sorted_accounts = []
-            for account_name in all_accounts:
-                if account_name == self.current_account:
-                    sorted_accounts.insert(0, account_name)  # 插入到第一位
-                else:
-                    sorted_accounts.append(account_name)
 
             # 设置切换账号标志
             self.is_switching_account = True
@@ -3792,82 +3798,56 @@ class MainWindow(QMainWindow):
             self.setEnabled(False)
             QApplication.processEvents()  # 立即处理事件以更新UI
 
-            # 创建账号选择对话框
-            dialog = QDialog(self)
-            dialog.setWindowTitle('切换账号')
-            dialog.setFixedSize(450, 350)
+            # 使用新的账号切换对话框
+            dialog = AccountSwitchDialog(self, self.api_client, self.current_account)
 
-            layout = QVBoxLayout(dialog)
-            layout.setSpacing(15)
-
-            # 标题
-            title_label = QLabel('选择要切换的账号')
-            title_label.setObjectName("dialogTitle")
-            layout.addWidget(title_label)
-
-            # 账号列表
-            account_list = QListWidget()
-            account_list.setObjectName("accountList")
-
-            # 明确禁用交替行颜色
-            account_list.setAlternatingRowColors(False)
-
-            # 添加账号到列表 - 当前账号排在第一位
-            for account_name in sorted_accounts:
-                if account_name == self.current_account:
-                    # 当前账号 - 不可选择
-                    display_text = f"📍 {account_name} (当前)"
-                    item = QListWidgetItem(display_text)
-                    item.setData(Qt.UserRole, account_name)
-
-                    # 设置为不可选择
-                    item.setFlags(Qt.ItemIsEnabled)
-                    item.setToolTip("这是当前账号，无法切换")
-
-                    # 标记为当前账号
-                    item.setData(Qt.UserRole + 1, "current")
-                else:
-                    # 其他账号 - 可选择
-                    display_text = f"👤 {account_name}"
-                    item = QListWidgetItem(display_text)
-                    item.setData(Qt.UserRole, account_name)
-
-                    # 设置可选择
-                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-
-                    # 标记为其他账号
-                    item.setData(Qt.UserRole + 1, "other")
-
-                account_list.addItem(item)
-
-            # 不需要事件过滤器了，QSS会处理hover效果
-
-            layout.addWidget(account_list)
-
-            # 按钮区域
-            button_layout = QHBoxLayout()
-            button_layout.addStretch()
-
-            cancel_btn = QPushButton('取消')
-            cancel_btn.setMinimumWidth(80)
-            cancel_btn.clicked.connect(dialog.reject)
-            button_layout.addWidget(cancel_btn)
-
-            switch_btn = QPushButton('切换')
-            switch_btn.setObjectName('authbut')
-            switch_btn.setMinimumWidth(80)
-            switch_btn.clicked.connect(lambda: self.switch_to_account(dialog, account_list))
-            button_layout.addWidget(switch_btn)
-
-            layout.addLayout(button_layout)
-
-            # 双击直接切换（不需要确认）
-            account_list.itemDoubleClicked.connect(lambda: self.switch_to_account_direct(dialog, account_list))
+            # 保存对话框引用，用于授权码获取回调
+            self._current_account_dialog = dialog
 
             # 对话框关闭时延迟恢复主窗口，清除所有待处理的事件
             dialog.finished.connect(self._on_account_dialog_finished)
 
-            dialog.exec_()
+            # 对话框关闭后清除引用
+            dialog.finished.connect(lambda: setattr(self, '_current_account_dialog', None))
+
+            if dialog.exec_() == QDialog.Accepted and dialog.selected_account:
+                # 用户选择了要切换的账号
+                account_name = dialog.selected_account
+
+                # 显示加载状态
+                self.status_label.setText(f"正在切换到账号: {account_name}...")
+                self.show_status_progress(f"正在切换账号...")
+                QApplication.processEvents()
+
+                # 执行切换
+                if self.api_client.switch_account(account_name):
+                    self.current_account = account_name
+
+                    # 同步 token 到 transfer_manager
+                    self.transfer_manager.api_client.access_token = self.api_client.access_token
+                    self.transfer_manager.api_client.current_account = self.api_client.current_account
+                    logger.info("已同步 token 到 transfer_manager")
+
+                    # 停止所有正在进行的文件加载任务
+                    if self.current_worker and self.current_worker.isRunning():
+                        logger.info("停止正在进行的文件加载任务")
+                        self.current_worker.stop()
+                        self.current_worker.wait()
+
+                    self.current_path = "/"
+                    self.update_user_info()
+                    self.hide_status_progress()
+                    self.status_label.setText(f"已切换到账号: {account_name}")
+
+                    # 直接刷新文件列表
+                    self.file_table.setRowCount(0)
+                    self.update_items("/")
+                    logger.info(f"成功切换到账号: {account_name}")
+                else:
+                    self.hide_status_progress()
+                    QMessageBox.critical(self, "错误", f"切换账号失败")
+                    logger.error(f"切换账号失败: {account_name}")
+                    self.status_label.setText("账号切换失败")
 
         except Exception as e:
             logger.error(f"显示切换账号对话框时出错: {e}")
@@ -4610,3 +4590,320 @@ class MainWindow(QMainWindow):
         """创建分享链接"""
         dialog = ShareDialog(file_data, self.api_client, self.config)
         dialog.exec_()
+
+
+class AccountSwitchDialog(QDialog):
+    """账号切换对话框 - 支持查看账号、切换账号和添加新账号"""
+
+    def __init__(self, parent=None, api_client=None, current_account=None):
+        super().__init__(parent)
+        self.api_client = api_client
+        self.current_account = current_account
+        self.selected_account = None
+        self.setup_ui()
+        self.load_accounts()
+
+    def setup_ui(self):
+        """设置UI"""
+        self.setWindowTitle('账号管理')
+        self.setFixedSize(500, 550)
+
+        # 设置样式
+        self.setStyleSheet(AppStyles.get_stylesheet())
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        # 标题
+        title_label = QLabel('账号管理')
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setObjectName('dialogTitle')
+        layout.addWidget(title_label)
+
+        # 账号列表区域
+        accounts_group = QGroupBox('已登录账号')
+        accounts_layout = QVBoxLayout(accounts_group)
+        accounts_layout.setContentsMargins(10, 10, 10, 10)
+        accounts_layout.setSpacing(5)
+
+        self.account_list = QListWidget()
+        self.account_list.setObjectName("accountList")
+        self.account_list.setAlternatingRowColors(False)
+        self.account_list.itemClicked.connect(self.on_account_selected)
+        self.account_list.itemDoubleClicked.connect(self.on_account_double_clicked)
+        self.account_list.setMaximumHeight(200)
+        accounts_layout.addWidget(self.account_list)
+
+        layout.addWidget(accounts_group)
+
+        # 添加账号表单区域（初始隐藏）
+        self.add_account_group = QGroupBox('添加新账号')
+        add_account_layout = QVBoxLayout(self.add_account_group)
+        add_account_layout.setContentsMargins(10, 10, 10, 10)
+        add_account_layout.setSpacing(8)
+
+        # 账号名称输入
+        form_layout = QHBoxLayout()
+        form_layout.addWidget(QLabel('账号名称:'))
+        self.account_name_input = QLineEdit()
+        self.account_name_input.setPlaceholderText('唯一标识')
+        form_layout.addWidget(self.account_name_input)
+        add_account_layout.addLayout(form_layout)
+
+        # 授权码输入
+        code_layout = QHBoxLayout()
+        code_layout.addWidget(QLabel('授权码:'))
+        self.code_input = QLineEdit()
+        self.code_input.setPlaceholderText('点击获取授权码')
+        self.code_input.setDisabled(True)
+        code_layout.addWidget(self.code_input)
+
+        self.get_code_btn = QPushButton('获取授权码')
+        self.get_code_btn.setObjectName('authbut')
+        self.get_code_btn.clicked.connect(self.get_auth_code)
+        code_layout.addWidget(self.get_code_btn)
+        add_account_layout.addLayout(code_layout)
+
+        # 登录按钮
+        self.login_btn = QPushButton('登录')
+        self.login_btn.setObjectName('login')
+        self.login_btn.setMinimumHeight(35)
+        self.login_btn.clicked.connect(self.do_login)
+        add_account_layout.addWidget(self.login_btn)
+
+        # 进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        add_account_layout.addWidget(self.progress_bar)
+
+        layout.addWidget(self.add_account_group)
+        self.add_account_group.setVisible(False)
+
+        layout.addStretch()
+
+        # 按钮区域
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        button_layout.setSpacing(10)
+
+        self.add_account_btn = QPushButton('+ 添加账号')
+        self.add_account_btn.setObjectName('authbut')
+        self.add_account_btn.setMinimumWidth(100)
+        self.add_account_btn.clicked.connect(self.show_add_account_form)
+        button_layout.addWidget(self.add_account_btn)
+
+        self.switch_btn = QPushButton('切换')
+        self.switch_btn.setObjectName('authbut')
+        self.switch_btn.setMinimumWidth(80)
+        self.switch_btn.clicked.connect(self.switch_to_selected_account)
+        self.switch_btn.setEnabled(False)
+        button_layout.addWidget(self.switch_btn)
+
+        cancel_btn = QPushButton('取消')
+        cancel_btn.setMinimumWidth(80)
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+
+        layout.addLayout(button_layout)
+
+    def load_accounts(self):
+        """加载所有已保存的账号"""
+        try:
+            self.account_list.clear()
+
+            if not self.api_client:
+                return
+
+            all_accounts = self.api_client.get_all_accounts()
+
+            if not all_accounts:
+                # 没有账号时显示提示
+                item = QListWidgetItem('暂无账号，请添加账号')
+                item.setFlags(Qt.ItemIsEnabled)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.account_list.addItem(item)
+                return
+
+            # 分离当前账号和其他账号
+            current_account_info = None
+            other_accounts = []
+
+            for account_name in all_accounts:
+                account_info = self.api_client.config.get('accounts', {}).get(account_name, {})
+                if account_name == self.current_account:
+                    current_account_info = (account_name, account_info)
+                else:
+                    other_accounts.append((account_name, account_info))
+
+            # 先添加当前账号（如果有）
+            if current_account_info:
+                account_name, account_info = current_account_info
+                baidu_name = account_info.get('account_name', account_name)
+                uk = account_info.get('uk', '')
+
+                if uk:
+                    display_text = f"📍 {baidu_name} | UK: {uk} [当前]"
+                else:
+                    display_text = f"📍 {baidu_name} [当前]"
+
+                item = QListWidgetItem(display_text)
+                item.setData(Qt.UserRole, account_name)
+                item.setData(Qt.UserRole + 1, "current")
+
+                # 设置为不可选择
+                item.setFlags(Qt.ItemIsEnabled)
+
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+
+                self.account_list.addItem(item)
+
+            # 按最后使用时间排序其他账号
+            sorted_other_accounts = sorted(
+                other_accounts,
+                key=lambda x: x[1].get('last_used', 0),
+                reverse=True
+            )
+
+            # 添加其他账号
+            for account_name, account_info in sorted_other_accounts:
+                baidu_name = account_info.get('account_name', account_name)
+                uk = account_info.get('uk', '')
+
+                if uk:
+                    display_text = f"👤 {baidu_name} | UK: {uk}"
+                else:
+                    display_text = f"👤 {baidu_name}"
+
+                item = QListWidgetItem(display_text)
+                item.setData(Qt.UserRole, account_name)
+                item.setData(Qt.UserRole + 1, "other")
+
+                # 设置可选择
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+
+                self.account_list.addItem(item)
+
+            # 设置第一项为选中项（如果不是当前账号）
+            if self.account_list.count() > 0:
+                first_item = self.account_list.item(0)
+                if first_item.data(Qt.UserRole + 1) == "other":
+                    self.account_list.setCurrentItem(first_item)
+
+        except Exception as e:
+            logger.error(f"加载账号列表失败: {e}")
+
+    def on_account_selected(self, item):
+        """账号被选中"""
+        account_type = item.data(Qt.UserRole + 1)
+        if account_type == "current":
+            # 当前账号，禁用切换按钮
+            self.switch_btn.setEnabled(False)
+            self.switch_btn.setToolTip("这是当前账号，无法切换")
+        else:
+            # 其他账号，启用切换按钮
+            self.switch_btn.setEnabled(True)
+            self.switch_btn.setToolTip("")
+
+    def on_account_double_clicked(self, item):
+        """账号被双击 - 直接切换"""
+        account_type = item.data(Qt.UserRole + 1)
+        if account_type == "current":
+            # 当前账号，不切换
+            return
+
+        # 直接切换到选中的账号
+        self.switch_to_selected_account()
+
+    def switch_to_selected_account(self):
+        """切换到选中的账号"""
+        try:
+            selected_items = self.account_list.selectedItems()
+            if not selected_items:
+                QMessageBox.warning(self, "提示", "请选择一个账号")
+                return
+
+            account_name = selected_items[0].data(Qt.UserRole)
+            if not account_name:
+                return
+
+            if account_name == self.current_account:
+                QMessageBox.information(self, "提示", "这是当前账号，无需切换")
+                return
+
+            # 设置选中的账号
+            self.selected_account = account_name
+            self.accept()
+
+        except Exception as e:
+            logger.error(f"切换账号失败: {e}")
+            QMessageBox.critical(self, "错误", f"切换账号失败: {str(e)}")
+
+    def show_add_account_form(self):
+        """显示添加账号表单"""
+        self.add_account_group.setVisible(True)
+        self.add_account_btn.setVisible(False)  # 隐藏添加账号按钮
+        self.account_list.clearSelection()
+        self.switch_btn.setEnabled(False)
+        self.account_name_input.setFocus()
+
+    def hide_add_account_form(self):
+        """隐藏添加账号表单"""
+        self.add_account_group.setVisible(False)
+        self.add_account_btn.setVisible(True)
+        # 重置表单
+        self.account_name_input.clear()
+        self.code_input.clear()
+
+    def get_auth_code(self):
+        """获取授权码"""
+        # 通知主窗口打开授权页面
+        if self.parent() and hasattr(self.parent(), 'get_auth_code_for_new_account'):
+            self.parent().get_auth_code_for_new_account()
+        else:
+            QMessageBox.warning(
+                self,
+                "错误",
+                "无法打开授权页面，请重启应用后重试"
+            )
+
+    def do_login(self):
+        """执行登录"""
+        account_name = self.account_name_input.text().strip()
+        code = self.code_input.text().strip()
+
+        if not account_name:
+            QMessageBox.warning(self, "提示", "请输入账号名称")
+            return
+
+        if not code or len(code) != 32:
+            QMessageBox.warning(self, "提示", "请先获取授权码")
+            return
+
+        # 禁用UI
+        self.login_btn.setDisabled(True)
+        self.login_btn.setText('登录中...')
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+
+        # 执行登录
+        try:
+            result = self.api_client.get_access_token(code, account_name)
+
+            if result.get('success'):
+                QMessageBox.information(self, "成功", f"账号 {account_name} 添加成功！")
+                # 刷新账号列表
+                self.load_accounts()
+                # 隐藏添加表单
+                self.hide_add_account_form()
+            else:
+                QMessageBox.critical(self, "失败", f"登录失败: {result.get('error', '未知错误')}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"登录过程出错: {str(e)}")
+        finally:
+            self.login_btn.setDisabled(False)
+            self.login_btn.setText('登录')
+            self.progress_bar.setVisible(False)

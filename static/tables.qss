@@ -70,15 +70,14 @@ QListWidget#accountList::item {
     padding: 12px;
     border-radius: 3px;
     font-size: 13px;
-    background-color: white;
 }
 
 /* 账号列表项悬停效果 */
-QListWidget#accountList::item:hover {
-    background-color: #f0f0f0;
+QListWidget#accountList::item:hover:!selected {
+    background-color: #f5f5f5;
 }
 
-/* 可选择的账号项选中效果 */
+/* 账号列表项选中效果 */
 QListWidget#accountList::item:selected {
     background-color: #2196F3;
     color: white;
